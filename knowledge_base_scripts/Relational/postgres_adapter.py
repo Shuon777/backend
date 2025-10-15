@@ -1,0 +1,1276 @@
+import os
+import json
+import sys
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import Json
+from dotenv import load_dotenv
+import re
+from datetime import datetime
+from pathlib import Path
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import numpy as np
+load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from embedding_config import embedding_config, get_model_dimension
+
+class NewResourceImporter:
+    def __init__(self):
+        self.db_config = {
+            "dbname": os.getenv("DB_NAME", "eco"),
+            "user": os.getenv("DB_USER", "postgres"),
+            "password": os.getenv("DB_PASSWORD", "Fdf78yh0a4b!"),
+            "host": os.getenv("DB_HOST", "localhost"),
+            "port": os.getenv("DB_PORT", "5432")
+        }
+        self.missing_geometry_objects = set()
+        current_model = os.getenv("EMBEDDING_MODEL", embedding_config.current_model)
+        embedding_dimension = os.getenv("EMBEDDING_DIMENSION")
+        
+        if embedding_dimension:
+            self.embedding_dimension = int(embedding_dimension)
+        else:
+            self.embedding_dimension = get_model_dimension(current_model)
+            
+        self.embedding_model_path = embedding_config.get_model_path(current_model)
+        
+        print(f"📏 Размерность эмбеддингов: {self.embedding_dimension}")
+        print(f"🎯 Активная модель: {current_model}")
+        print(f"📁 Путь к модели: {self.embedding_model_path}")
+        
+        
+        self.conn = None
+        self.cur = None
+        self.entity_cache = {}
+        self.author_cache = {}
+        self.bio_entity_cache = {}
+        self.geodb_data = self.load_geodb()
+        self.species_synonyms_path = self._get_species_synonyms_path()
+        self.species_synonyms = self.load_species_synonyms() or {}
+        self.embedding_model = self.load_embedding_model()
+    
+    def load_embedding_model(self):
+        """Загрузка модели для генерации эмбеддингов"""
+        try:
+            embeddings = HuggingFaceEmbeddings(
+                model_name=self.embedding_model_path,
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': False}
+            )
+            return embeddings
+        except Exception as e:
+            print(f"Error loading embedding model: {e}")
+            return None
+    
+    from embedding_config import get_model_dimension
+
+    def generate_embedding(self, text):
+        """Генерация эмбеддинга для текста"""
+        if not text or not self.embedding_model:
+            return None
+        
+        try:
+            combined_text = text
+            embedding = self.embedding_model.embed_query(combined_text)
+            
+            if len(embedding) != self.embedding_dimension:
+                print(f"⚠️  Предупреждение: Размерность эмбеддинга ({len(embedding)}) не совпадает с ожидаемой ({self.embedding_dimension})")
+            
+            return embedding
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            return None
+        
+    def load_geodb(self):
+        try:
+            with open("/var/www/salut_bot/json_files/geodb.json", 'r') as f:
+                return json.load(f)
+        except:
+            return {}   
+    
+    def connect(self):
+        self.conn = psycopg2.connect(**self.db_config)
+        self.cur = self.conn.cursor()
+
+    def disconnect(self):
+        if self.cur:
+            self.cur.close()
+        if self.conn:
+            self.conn.close()
+            
+    def get_geo_data(self, geo_name):
+        """Получаем полные геоданные для объекта из geodb.json с учетом частичных совпадений"""
+        if not hasattr(self, 'geodb_data'):
+            try:
+                with open("/var/www/salut_bot/json_files/geodb.json", 'r') as f:
+                    self.geodb_data = json.load(f)
+            except Exception as e:
+                print(f"Error loading geodb.json: {e}")
+                return None
+        
+        # Поиск по точному соответствию
+        if geo_name in self.geodb_data:
+            return self.geodb_data[geo_name]
+        
+        # Поиск без учета регистра
+        for name, data in self.geodb_data.items():
+            if name.lower() == geo_name.lower():
+                return data
+        
+        # Поиск частичных совпадений (без уточнения района)
+        # Например: "Ольхонский район, мыс Бурхан" -> ищем "мыс Бурхан"
+        geo_name_lower = geo_name.lower()
+        
+        # Пробуем найти часть после запятой
+        if ',' in geo_name:
+            parts = [part.strip() for part in geo_name.split(',')]
+            # Ищем самые конкретные части (последние)
+            for part in reversed(parts):
+                if part and part in self.geodb_data:
+                    return self.geodb_data[part]
+                # Поиск без учета регистра
+                for name, data in self.geodb_data.items():
+                    if name.lower() == part.lower():
+                        return data
+        
+        # Поиск по частичному вхождению (если есть общие слова)
+        geo_words = set(geo_name_lower.split())
+        best_match = None
+        best_score = 0
+        
+        for name, data in self.geodb_data.items():
+            name_lower = name.lower()
+            name_words = set(name_lower.split())
+            
+            # Вычисляем степень совпадения
+            common_words = geo_words.intersection(name_words)
+            score = len(common_words)
+            
+            # Предпочтение более длинным совпадениям
+            if score > best_score:
+                best_score = score
+                best_match = data
+        
+        if best_score >= 2:  # Минимум 2 общих слова
+            return best_match
+        
+        # Если ничего не найдено, добавляем в список отсутствующих
+        self.missing_geometry_objects.add(geo_name)
+        return None
+    
+    def process_geo_mention(self, source_id, source_type, geo_name, name_info):
+        if not geo_name:
+            return None
+            
+        try:
+            normalized_name = self.normalize_geo_name(geo_name)
+            
+            # Ищем по нормализованному имени
+            self.cur.execute(
+                "SELECT id FROM geographical_entity "
+                "WHERE lower(name_ru) = %s",
+                (normalized_name,)
+            )
+            existing_geo = self.cur.fetchone()
+            
+            geo_id = None
+            if existing_geo:
+                geo_id = existing_geo[0]
+            else:
+                # Пробуем найти упрощенное название (без района)
+                simplified_name = self.simplify_geo_name(geo_name)
+                if simplified_name != normalized_name:
+                    self.cur.execute(
+                        "SELECT id FROM geographical_entity "
+                        "WHERE lower(name_ru) = %s",
+                        (simplified_name.lower(),)
+                    )
+                    existing_simplified = self.cur.fetchone()
+                    if existing_simplified:
+                        geo_id = existing_simplified[0]
+            
+            if not geo_id:
+                # Создаем новую географическую сущность
+                self.cur.execute(
+                    "INSERT INTO geographical_entity (name_ru, feature_data) "
+                    "VALUES (%s, %s) RETURNING id",
+                    (geo_name, Json({
+                        'source': 'text_mention',
+                        'normalized_name': normalized_name,
+                        'original_name': geo_name,
+                        'simplified_name': self.simplify_geo_name(geo_name)
+                    }))
+                )
+                geo_id = self.cur.fetchone()[0]
+
+                self.add_reliability('geographical_entity', geo_id, name_info.get('source'))
+
+            if source_id and source_type:
+                self.cur.execute(
+                    "INSERT INTO entity_geo (entity_id, entity_type, geographical_entity_id) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (entity_id, entity_type, geographical_entity_id) DO NOTHING",
+                    (source_id, source_type, geo_id)
+                )
+
+            return geo_id
+
+        except Exception as e:
+            print(f"Error processing geo mention '{geo_name}': {e}")
+            return None
+
+    def simplify_geo_name(self, geo_name):
+        """Упрощает название географического объекта, убирая указания районов"""
+        if not geo_name:
+            return geo_name
+        
+        # Убираем указания районов (все что до первой запятой)
+        if ',' in geo_name:
+            parts = [part.strip() for part in geo_name.split(',')]
+            # Берем самую конкретную часть (обычно последнюю)
+            return parts[-1]
+        
+        return geo_name.strip()
+
+    def save_missing_geometry_objects(self, output_file="missing_geometry_objects.json"):
+        """Сохраняет названия объектов без геометрии в JSON файл"""
+        if self.missing_geometry_objects:
+            missing_list = list(self.missing_geometry_objects)
+            try:
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(missing_list, f, ensure_ascii=False, indent=2)
+                print(f"Сохранено {len(missing_list)} объектов без геометрии в {output_file}")
+            except Exception as e:
+                print(f"Ошибка сохранения файла отсутствующих геометрий: {e}")
+        else:
+            print("Все гео-объекты имеют геометрию")
+        
+    def clean_coordinate(self, coord):
+        """Очистка и валидация координат"""
+        if coord is None:
+            return None
+        
+        if isinstance(coord, (int, float)):
+            return float(coord)
+        
+        if isinstance(coord, str):
+            try:
+                return float(coord)
+            except ValueError:
+                cleaned = coord.strip()
+                try:
+                    return float(cleaned)
+                except ValueError:
+                    print(f"Warning: Cannot convert coordinate '{coord}' to float")
+                    return None
+        
+        try:
+            return float(str(coord))
+        except (ValueError, TypeError):
+            print(f"Warning: Invalid coordinate type: {type(coord)}, value: {coord}")
+            return None
+        
+    def _get_species_synonyms_path(self):
+        """Определяем путь к файлу species_synonyms.json"""
+        current_dir = Path(__file__).parent
+        base_dir = current_dir.parent.parent
+        json_files_dir = base_dir / "json_files"
+        return json_files_dir / "species_synonyms.json"
+    
+    def load_species_synonyms(self):
+        """Загрузка синонимов видов из JSON-файла"""
+        try:
+            with open(self.species_synonyms_path, 'r', encoding='utf-8') as f:  # Исправленный путь
+                return json.load(f)
+        except FileNotFoundError:
+            print(f"Файл синонимов {self.species_synonyms_path} не найден. Будет использован пустой словарь.")
+            return {}
+        except Exception as e:
+            print(f"Ошибка загрузки файла синонимов: {e}")
+            return {}
+    
+    def normalize_species_name(self, name):
+        """Нормализация названия вида с учетом синонимов"""
+        if not name:
+            return name
+            
+        name_lower = name.strip().lower()
+        for main_name, synonyms in self.species_synonyms.items():
+            if name_lower in [s.lower() for s in synonyms] or name_lower == main_name.lower():
+                return main_name
+        return name
+    
+    def parse_date(self, date_str):
+        """Преобразование даты в формат PostgreSQL"""
+        if not date_str:
+            return None
+            
+        try:
+            # Удаляем специальные символы (· и т.д.)
+            date_str = re.sub(r'[·•]', ' ', date_str).strip()
+            
+            # Пробуем разные форматы дат
+            formats = [
+                '%d.%m.%Y %H:%M',  # 24.05.2022 18:53
+                '%d.%m.%Y',         # 24.05.2022
+                '%d.%m.%y %H:%M',   # 24.05.22 18:53
+                '%d.%m.%y',          # 24.05.22
+                '%Y-%m-%d %H:%M:%S', # Стандартный SQL
+                '%Y-%m-%d',          # Стандартный SQL (без времени)
+                '%d/%m/%Y %H:%M',    # Альтернативный формат
+                '%d/%m/%Y',          # Альтернативный формат
+                '%d %m %Y %H:%M',    # Еще один вариант
+                '%d %m %Y'           # Еще один вариант
+            ]
+            
+            for fmt in formats:
+                try:
+                    dt = datetime.strptime(date_str, fmt)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                    
+            return None
+        except Exception as e:
+            print(f"Date parsing error for '{date_str}': {e}")
+            return None
+
+    def get_or_create_author(self, full_name, organization=None):
+        """Получаем или создаем автора с проверкой существования"""
+        if not full_name:
+            return None
+            
+        cache_key = f"{full_name}_{organization}"
+        if cache_key in self.author_cache:
+            # Проверяем, что автор действительно существует
+            author_id = self.author_cache[cache_key]
+            self.cur.execute("SELECT 1 FROM author WHERE id = %s", (author_id,))
+            if self.cur.fetchone():
+                return author_id
+            else:
+                del self.author_cache[cache_key]
+        
+        try:
+            # Ищем автора в базе
+            self.cur.execute(
+                "SELECT id FROM author WHERE full_name = %s AND organization = %s",
+                (full_name, organization)
+            )
+            author = self.cur.fetchone()
+            
+            if author:
+                self.author_cache[cache_key] = author[0]
+                return author[0]
+                
+            # Создаем нового автора
+            self.cur.execute(
+                "INSERT INTO author (full_name, organization) VALUES (%s, %s) RETURNING id",
+                (full_name, organization)
+            )
+            author_id = self.cur.fetchone()[0]
+            self.conn.commit()  # Фиксируем создание автора сразу
+            self.author_cache[cache_key] = author_id
+            return author_id
+            
+        except Exception as e:
+            print(f"Error processing author {full_name}: {e}")
+            self.conn.rollback()
+            return None
+
+    def get_reliability_value(self, source):
+        """Определяем уровень достоверности на основе источника"""
+        if not source:
+            return "общедоступная"
+        
+        source_lower = source.lower()
+        if "национальный парк" in source_lower or "заповедник" in source_lower:
+            return "профильная организация"
+        elif "ai generation" in source_lower or "википедия" in source_lower:
+            return "общедоступная"
+        return "профильная организация"
+
+    def add_reliability(self, table_name, entity_id, source, column_name=None):
+        """Добавляем запись о достоверности"""
+        reliability_value = self.get_reliability_value(source)
+        try:
+            self.cur.execute(
+                "INSERT INTO reliability (entity_table, entity_id, column_name, reliability_value) "
+                "VALUES (%s, %s, %s, %s)",
+                (table_name, entity_id, column_name, reliability_value)
+            )
+        except Exception as e:
+            print(f"Error adding reliability: {e}")
+
+    def create_entity_identifier(self, entity_id, entity_type, identificator, access):
+        """Создаем идентификаторы сущностей"""
+        name_info = identificator.get('name', {})
+        try:
+            self.cur.execute(
+                "INSERT INTO entity_identifier (url, file_path, name_ru, name_en, name_latin) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (
+                    access.get('source_url'),
+                    access.get('file_path'),
+                    name_info.get('common'),
+                    name_info.get('en_name'),
+                    name_info.get('scientific')
+                )
+            )
+            identifier_id = self.cur.fetchone()[0]
+            
+            self.cur.execute(
+                "INSERT INTO entity_identifier_link (entity_id, entity_type, identifier_id) "
+                "VALUES (%s, %s, %s)",
+                (entity_id, entity_type, identifier_id)
+            )
+            
+            return identifier_id
+        except Exception as e:
+            print(f"Error creating entity identifier: {e}")
+            return None
+
+    def get_title(self, resource):
+        """Получаем заголовок из различных источников с приоритетом"""
+        common_name = resource['identificator'].get('name', {}).get('common')
+        if common_name:
+            return common_name
+        
+        original_title = resource.get('access_options', {}).get('original_title')
+        if original_title:
+            return original_title
+        
+        return resource['identificator'].get('id', 'Без названия')
+
+    def find_biological_entity(self, common_name, scientific_name):
+        """Ищем по научному и общеупотребительному имени с кэшированием по обоим"""
+        if scientific_name and scientific_name in self.bio_entity_cache:
+            return self.bio_entity_cache[scientific_name]
+        
+        if common_name and common_name in self.bio_entity_cache:
+            return self.bio_entity_cache[common_name]
+        
+        try:
+            conditions = []
+            params = []
+            
+            if scientific_name:
+                conditions.append("scientific_name = %s")
+                params.append(scientific_name)
+            if common_name:
+                conditions.append("common_name_ru = %s")
+                params.append(common_name)
+
+            if conditions:
+                query = "SELECT id, scientific_name, common_name_ru FROM biological_entity WHERE "
+                query += " OR ".join(conditions)
+                self.cur.execute(query, params)
+                result = self.cur.fetchone()
+                
+                if result:
+                    bio_id, sci_name, com_name = result
+                    if sci_name:
+                        self.bio_entity_cache[sci_name] = bio_id
+                    if com_name:
+                        self.bio_entity_cache[com_name] = bio_id
+                    return bio_id
+        except Exception as e:
+            print(f"Error finding biological entity: {e}")
+        return None
+
+    def process_biological_entity(self, source_id, source_type, name_info, classification, feature_data):
+        """Создаем биологическую сущность и связи с учетом синонимов"""
+        try:
+            common_name = self.normalize_species_name(name_info.get('common')) or 'Неизвестный вид'
+            scientific_name = name_info.get('scientific')
+            
+            bio_id = self.find_biological_entity(common_name, scientific_name)
+            
+            if not bio_id:
+                self.cur.execute(
+                    "INSERT INTO biological_entity (common_name_ru, scientific_name, description, feature_data) "
+                    "VALUES (%s, %s, %s, %s) RETURNING id",
+                    (
+                        common_name,
+                        scientific_name,
+                        feature_data.get('image_caption'),
+                        Json({
+                            'classification': classification,
+                            'habitat': feature_data.get('habitat'),
+                            'season': feature_data.get('season'),
+                            'original_names': [name_info.get('common')] 
+                        })
+                    )
+                )
+                bio_id = self.cur.fetchone()[0]
+                
+                self.bio_entity_cache[common_name] = bio_id
+                if scientific_name:
+                    self.bio_entity_cache[scientific_name] = bio_id
+                if name_info.get('common'):
+                    self.bio_entity_cache[name_info.get('common')] = bio_id
+                    
+                self.add_reliability('biological_entity', bio_id, name_info.get('source'))
+            
+            self.cur.execute(
+                "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (source_id, source_type, bio_id, 'biological_entity', 'изображение объекта')
+            )
+            
+            return bio_id
+            
+        except Exception as e:
+            print(f"Error processing biological entity: {e}")
+            return None
+
+    def process_geographical_data(self, entity_id, entity_type, location, name_info):
+        """Обрабатываем географические данные с координатами и создаем map_content"""
+        try:
+            coords = location.get('coordinates', {})
+            lat = self.clean_coordinate(coords.get('latitude'))
+            lon = self.clean_coordinate(coords.get('longitude'))
+            #print(location)
+            if lat is None or lon is None:
+                print(f"Warning: Invalid coordinates for {entity_type} {entity_id}")
+                return None
+                
+            geo_name = location.get('location') or name_info.get('common') or 'Геоточка'
+            
+            self.cur.execute(
+                "SELECT id FROM geographical_entity WHERE name_ru = %s "
+                "AND feature_data->'coordinates'->>'latitude' = %s "
+                "AND feature_data->'coordinates'->>'longitude' = %s",
+                (geo_name, str(lat), str(lon))
+            )
+            existing_geo = self.cur.fetchone()
+
+            geo_id = None
+            if existing_geo:
+                geo_id = existing_geo[0]
+            else:
+                self.cur.execute(
+                    "INSERT INTO geographical_entity (name_ru, description, feature_data) "
+                    "VALUES (%s, %s, %s) RETURNING id",
+                    (
+                        geo_name,
+                        f"{location.get('region', '')}, {location.get('country', '')}",
+                        Json({
+                            **location,
+                            'coordinates': {
+                                'latitude': lat,
+                                'longitude': lon
+                            }
+                        })
+                    )
+                )
+                geo_id = self.cur.fetchone()[0]
+                
+                self.add_reliability('geographical_entity', geo_id, name_info.get('source'))
+                
+                self.cur.execute(
+                    "INSERT INTO map_content (title, geometry, feature_data) "
+                    "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s) RETURNING id",
+                    (
+                        f"Координаты {geo_name}",
+                        lon,
+                        lat,
+                        Json(location)
+                    )
+                )
+                map_id = self.cur.fetchone()[0]
+                
+                self.cur.execute(
+                    "INSERT INTO entity_geo (entity_id, entity_type, geographical_entity_id) "
+                    "VALUES (%s, %s, %s)",
+                    (map_id, 'map_content', geo_id)
+                )
+
+            self.cur.execute(
+                "INSERT INTO entity_geo (entity_id, entity_type, geographical_entity_id) "
+                "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (entity_id, entity_type, geo_id)
+            )
+
+            return geo_id
+            
+        except Exception as e:
+            print(f"Error processing geographical data for {entity_type} {entity_id}: {e}")
+            return None
+    def process_geographical_object(self, resource):
+        """Обработка географических объектов с созданием текстового описания и связей"""
+        try:
+            identificator = resource['identificator']
+            name_info = identificator.get('name', {})
+            geo_synonyms = resource.get('geo_synonyms', [])
+            
+            common_name = name_info.get('common')
+            geo_entity_type = resource.get('geo_entity_type', 'Географический')
+            description = resource.get('description', '')
+            coordinates = resource.get('coordinates', {})
+            
+            # ДЕБАГ: Выводим что пришло в resource
+            
+            # Создаем базовый feature_data
+            feature_data = {
+                'source': 'sights.json',
+                'original_name': common_name,
+                'coordinates': coordinates,
+                'geo_synonyms': geo_synonyms,
+                'information_type': resource.get('information_type'),
+                'validation_status': resource.get('validation_status'),
+                'validation_result': resource.get('validation_result')
+            }
+
+
+            # Добавляем данные из resource['feature_data'], если они есть
+            if 'feature_data' in resource and resource['feature_data']:
+                
+                # Используем глубокое копирование для избежания конфликтов
+                import copy
+                resource_feature_data = copy.deepcopy(resource['feature_data'])
+                feature_data.update(resource_feature_data)
+                
+
+            feature_data_json = Json(feature_data)
+
+            # 1. Создаем основную географическую сущность
+            self.cur.execute(
+                "INSERT INTO geographical_entity (name_ru, description, type, feature_data) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (
+                    common_name,
+                    description,
+                    geo_entity_type,
+                    feature_data_json
+                )
+            )
+            geo_id = self.cur.fetchone()[0]
+            entity_type = 'geographical_entity'
+            
+            # ДЕБАГ: Проверяем что реально записалось в базу
+            self.cur.execute(
+                "SELECT feature_data FROM geographical_entity WHERE id = %s",
+                (geo_id,)
+            )
+            saved_data = self.cur.fetchone()[0]
+            print(f"🔍 ДЕБАГ сохранено в БД keys: {list(saved_data.keys()) if saved_data else 'NO DATA'}")
+            print(f"🔍 ДЕБАГ сохранено location_info: {'location_info' in saved_data if saved_data else False}")
+            print(f"🔍 ДЕБАГ сохранено geo_type: {'geo_type' in saved_data if saved_data else False}")
+            print(f"🔍 ДЕБАГ сохранено flora_fauna_relations: {'flora_fauna_relations' in saved_data if saved_data else False}")
+            
+            self.add_reliability('geographical_entity', geo_id, name_info.get('source'))
+            
+            # 2. Создаем текстовое описание с эмбеддингом
+            text_content_id = self._create_geographical_text_content(
+                common_name, 
+                description, 
+                geo_entity_type,
+                coordinates,
+                name_info.get('source')
+            )
+            
+            # 3. Создаем связь между текстовым описанием и географической сущностью
+            if text_content_id:
+                self.cur.execute(
+                    "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (text_content_id, 'text_content', geo_id, entity_type, 'описание объекта')
+                )
+            
+            # 4. Создаем идентификатор
+            self.create_entity_identifier(geo_id, entity_type, identificator, {})
+            
+            # 5. Обрабатываем координаты для создания map_content
+            lat = self.clean_coordinate(coordinates.get('latitude'))
+            lon = self.clean_coordinate(coordinates.get('longitude'))
+            
+            if lat is not None and lon is not None:
+                # Создаем map_content с точкой
+                self.cur.execute(
+                    "INSERT INTO map_content (title, geometry, feature_data) "
+                    "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s) RETURNING id",
+                    (
+                        f"Координаты {common_name}",
+                        lon,
+                        lat,
+                        Json({
+                            'source': 'sights.json',
+                            'geo_entity_id': geo_id,
+                            'type': geo_entity_type,
+                            'original_name': common_name,
+                            'description_preview': description[:200] + '...' if len(description) > 200 else description
+                        })
+                    )
+                )
+                map_id = self.cur.fetchone()[0]
+                
+                # Связываем map_content с географической сущностью
+                self.cur.execute(
+                    "INSERT INTO entity_geo (entity_id, entity_type, geographical_entity_id) "
+                    "VALUES (%s, %s, %s)",
+                    (map_id, 'map_content', geo_id)
+                )
+            
+            # 6. Обрабатываем дополнительные geo_synonyms
+            for geo_name in geo_synonyms:
+                if geo_name and geo_name != common_name:
+                    self.process_geo_mention(geo_id, entity_type, geo_name, name_info)
+            
+            print(f"✅ Создан географический объект: {common_name} (тип: {geo_entity_type}, id: {geo_id})")
+            return geo_id
+            
+        except Exception as e:
+            print(f"❌ Error processing geographical object: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _create_geographical_text_content(self, name, description, geo_type, coordinates, source):
+        """Создает текстовое описание для географического объекта с эмбеддингом"""
+        try:
+            # Формируем структурированные данные
+            structured_data = {
+                "geographical_info": {
+                    "object_type": geo_type,
+                    "coordinates": coordinates,
+                    "name": name,
+                    "description": description
+                },
+                "metadata": {
+                    "source": source,
+                    "import_timestamp": datetime.now().isoformat()
+                }
+            }
+            
+            # Генерируем эмбеддинг из названия и описания
+            text_for_embedding = f"{name}. {description}"
+            embedding = self.generate_embedding(text_for_embedding)
+            
+            # Вставляем в text_content
+            self.cur.execute(
+                "INSERT INTO text_content (title, content, structured_data, description, embedding) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (
+                    name,
+                    description,  # Основной контент
+                    Json(structured_data),
+                    f"Описание географического объекта: {geo_type}",
+                    embedding
+                )
+            )
+            text_id = self.cur.fetchone()[0]
+            
+            # Добавляем информацию о достоверности
+            self.add_reliability('text_content', text_id, source)
+            
+            # Создаем идентификатор для текстового контента
+            self.cur.execute(
+                "INSERT INTO entity_identifier (name_ru) VALUES (%s) RETURNING id",
+                (f"Текстовое описание: {name}",)
+            )
+            ident_id = self.cur.fetchone()[0]
+            
+            self.cur.execute(
+                "INSERT INTO entity_identifier_link (entity_id, entity_type, identifier_id) "
+                "VALUES (%s, %s, %s)",
+                (text_id, 'text_content', ident_id)
+            )
+            
+            print(f"Создано текстовое описание для географического объекта: {name} (id: {text_id})")
+            return text_id
+            
+        except Exception as e:
+            print(f"Error creating geographical text content: {e}")
+            return Noneы
+        
+    def process_text(self, resource):
+        """Обработка текстовых ресурсов с генерацией эмбеддингов и structured_data"""
+        try:
+            identificator = resource['identificator']
+            access = resource.get('access_options', {})
+            name_info = identificator.get('name', {})
+            
+            title = self.get_title(resource)
+            structured_data = resource.get('structured_data')
+            
+            # Логируем полученные данные для отладки
+            print(f"Processing text: {title}")
+            print(f"Has structured_data: {structured_data is not None}")
+            
+            # Генерируем эмбеддинг только из заголовка, если есть structured_data
+            # Или из комбинации заголовка и контента, если structured_data нет
+            if structured_data:
+                combined_text = title  # Используем только заголовок
+            else:
+                content = resource.get('content', '')
+                combined_text = f"{title} {content}" if title else content
+            
+            embedding = self.generate_embedding(combined_text)
+            
+            # Обрабатываем structured_data с проверкой ошибок
+            structured_data_json = None
+            if structured_data:
+                try:
+                    structured_data_json = Json(structured_data)
+                    print("Structured data processed successfully")
+                except Exception as e:
+                    print(f"Error converting structured_data to JSON: {e}")
+                    # Пытаемся сохранить как строку для отладки
+                    try:
+                        structured_data_json = Json({"error": f"Failed to parse: {str(structured_data)[:100]}..."})
+                    except:
+                        structured_data_json = None
+            
+            # Вставляем данные в базу - content только если нет structured_data
+            self.cur.execute(
+                "INSERT INTO text_content (title, content, structured_data, description, embedding) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (
+                    title,
+                    None if structured_data else resource.get('content', ''),  # content только если нет structured_data
+                    structured_data_json,
+                    resource.get('brief_annotation', ''),
+                    embedding  
+                )
+            )
+            text_id = self.cur.fetchone()[0]
+            entity_type = 'text_content'
+            
+            self.add_reliability('text_content', text_id, name_info.get('source'))
+            
+            self.create_entity_identifier(text_id, entity_type, identificator, access)
+            
+            # Обработка автора
+            author_name = access.get('author')
+            if author_name:
+                author_id = self.get_or_create_author(author_name)
+                if author_id:
+                    self.cur.execute(
+                        "INSERT INTO entity_author (entity_id, entity_type, author_id) "
+                        "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                        (text_id, entity_type, author_id)
+                    )
+            
+            # Обработка географических упоминаний
+            geo_synonyms = resource.get('geo_synonyms', [])
+            for geo_name in geo_synonyms:
+                if geo_name:  # Проверяем, что имя не пустое
+                    self.process_geo_mention(text_id, entity_type, geo_name, name_info)
+            
+            # Обработка биологических сущностей
+            if resource.get('information_type') == "Объект флоры и фауны":
+                common_name = name_info.get('common')
+                scientific_name = name_info.get('scientific')
+                
+                if common_name or scientific_name:
+                    bio_id = self.find_biological_entity(common_name, scientific_name)
+                    
+                    if not bio_id:
+                        # Создаем новую биологическую сущность
+                        self.cur.execute(
+                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description) "
+                            "VALUES (%s, %s, %s) RETURNING id",
+                            (common_name, scientific_name, f"Автоматически создано из текста: {title}")
+                        )
+                        bio_id = self.cur.fetchone()[0]
+                        
+                        # Обновляем кэш
+                        if common_name:
+                            self.bio_entity_cache[common_name] = bio_id
+                        if scientific_name:
+                            self.bio_entity_cache[scientific_name] = bio_id
+                        
+                        self.add_reliability('biological_entity', bio_id, name_info.get('source'))
+                    
+                    # Создаем связь
+                    self.cur.execute(
+                        "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                        (text_id, entity_type, bio_id, 'biological_entity', 'описание объекта')
+                    )
+            
+            print(f"Successfully processed text ID: {text_id}")
+            return text_id
+            
+        except Exception as e:
+            print(f"Error processing text: {e}")
+            import traceback
+            traceback.print_exc()  # Добавляем полный traceback для отладки
+            return None
+            
+    def process_image(self, resource):
+        """Обработка изображений с созданием географических сущностей"""
+        try:
+            identificator = resource['identificator']
+            access = resource.get('access_options', {})
+            feature_photo = resource.get('featurePhoto', {})
+            name_info = identificator.get('name', {})
+            
+            title = self.get_title(resource)
+            
+            self.cur.execute(
+                "INSERT INTO image_content (title, description, feature_data) "
+                "VALUES (%s, %s, %s) RETURNING id",
+                (
+                    title,
+                    feature_photo.get('image_caption'),
+                    Json(feature_photo)
+                )
+            )
+            image_id = self.cur.fetchone()[0]
+            entity_type = 'image_content'
+            
+            self.add_reliability('image_content', image_id, name_info.get('source'))
+            self.create_entity_identifier(image_id, entity_type, identificator, access)
+            
+            author_name = access.get('author')
+            if author_name:
+                author_id = self.get_or_create_author(author_name)
+                if author_id:
+                    self.cur.execute(
+                        "INSERT INTO entity_author (entity_id, entity_type, author_id) "
+                        "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                        (image_id, entity_type, author_id)
+                    )
+            
+            date_taken = feature_photo.get('date')
+            if date_taken:
+                parsed_date = self.parse_date(date_taken)
+                if parsed_date:
+                    self.cur.execute(
+                        "INSERT INTO temporal_reference (resource_creation_date) "
+                        "VALUES (%s) RETURNING id",
+                        (parsed_date,)
+                    )
+                    temporal_id = self.cur.fetchone()[0]
+                    self.cur.execute(
+                        "INSERT INTO entity_temporal (entity_id, entity_type, temporal_id) "
+                        "VALUES (%s, %s, %s)",
+                        (image_id, entity_type, temporal_id)
+                    )
+            
+            classification = feature_photo.get('classification_info')
+            if classification:
+                self.process_biological_entity(
+                    image_id, 
+                    entity_type,
+                    name_info,
+                    classification,
+                    feature_photo
+                )
+            
+            location = feature_photo.get('location', {})
+            if location:
+                self.process_geographical_data(
+                    image_id, 
+                    entity_type,
+                    location,
+                    name_info
+                )
+                
+            return image_id
+            
+        except Exception as e:
+            print(f"Error processing image: {e}")
+            return None
+
+    def process_weather(self, entity_id, entity_type, weather_conditions):
+        """Обрабатываем погодные условия"""
+        try:
+            windy = 'ветер' in weather_conditions.lower()
+            rain = 'дождь' in weather_conditions.lower()
+            
+            self.cur.execute(
+                "INSERT INTO weather_reference (weather_conditions, windy, rain) "
+                "VALUES (%s, %s, %s) RETURNING id",
+                (weather_conditions, windy, rain)
+            )
+            weather_id = self.cur.fetchone()[0]
+            
+            self.cur.execute(
+                "INSERT INTO entity_weather (entity_id, entity_type, weather_id) "
+                "VALUES (%s, %s, %s)",
+                (entity_id, entity_type, weather_id)
+            )
+            
+            return weather_id
+            
+        except Exception as e:
+            print(f"Error processing weather: {e}")
+            return None
+        
+    def normalize_geo_name(self, name):
+        """Унифицируем регистр названий"""
+        if not name:
+            return name
+        return name.strip().lower()  # Приводим к нижнему регистру
+
+    def _get_biological_name_from_map(self, resource):
+        """Получает название биологической сущности для карт с приоритетом plant_russian_name"""
+        # Приоритет 1: plant_russian_name (если есть и валидно)
+        plant_russian_name = resource.get('plant_russian_name')
+        if plant_russian_name and plant_russian_name.strip():
+            return plant_russian_name.strip()
+        
+        # Приоритет 2: из common name (убираем "Место обитания")
+        common_name = resource['identificator'].get('name', {}).get('common', '')
+        if common_name:
+            # Убираем "Место обитания" и лишние пробелы
+            cleaned_name = common_name.replace('Место обитания', '').replace('место обитания', '').strip()
+            if cleaned_name:
+                return cleaned_name
+        
+        # Приоритет 3: из ID (убираем GEO_)
+        resource_id = resource['identificator'].get('id', '')
+        if resource_id.startswith('GEO_'):
+            return resource_id.replace('GEO_', '').replace('_', ' ').strip()
+        
+        return 'Неизвестный вид'
+
+    def process_map(self, resource):
+        identificator = resource['identificator']
+        name_info = identificator.get('name', {})
+        geo_synonyms = resource.get('geo_synonyms', [])
+        
+        common_name = self._get_biological_name_from_map(resource)
+        
+        bio_id = self._process_biological_entity(
+            common_name,
+            resource.get('plant_latin_name'),
+            name_info.get('source')
+        )
+
+        # Обрабатываем все географические объекты
+        for geo_name in geo_synonyms:
+            if not geo_name:
+                continue
+                
+            # Получаем упрощенное название
+            simplified_name = self.simplify_geo_name(geo_name)
+            
+            # Ищем геометрию по упрощенному названию
+            geo_data = self.get_geo_data(simplified_name)
+            
+            if geo_data and 'geometry' in geo_data:
+                # Создаем географическую сущность для полного названия
+                full_geo_id = self.process_geo_mention(None, None, geo_name, name_info)
+                
+                # Проверяем, существует ли уже map_content для этой геометрии
+                self.cur.execute(
+                    """
+                    SELECT mc.id FROM map_content mc
+                    WHERE ST_Equals(mc.geometry, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
+                    LIMIT 1
+                    """,
+                    (json.dumps(geo_data['geometry']),)
+                )
+                existing_map = self.cur.fetchone()
+                
+                if existing_map:
+                    map_id = existing_map[0]
+                else:
+                    # Создаем map_content только если он не существует
+                    self.cur.execute(
+                        """
+                        INSERT INTO map_content (title, geometry, feature_data)
+                        VALUES (%s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s)
+                        RETURNING id
+                        """,
+                        (
+                            f"Карта: {simplified_name}",
+                            json.dumps(geo_data['geometry']),
+                            Json({
+                                'source': 'geodb.json',
+                                'original_name': simplified_name,
+                                'full_name': geo_name
+                            })
+                        )
+                    )
+                    map_id = self.cur.fetchone()[0]
+                
+                # Связываем map_content с географической сущностью
+                self.cur.execute(
+                    """
+                    INSERT INTO entity_geo 
+                    (entity_id, entity_type, geographical_entity_id)
+                    VALUES (%s, 'map_content', %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (map_id, full_geo_id)
+                )
+                
+                # Связываем биологическую сущность с географической
+                if bio_id:
+                    self.cur.execute(
+                        """
+                        INSERT INTO entity_geo 
+                        (entity_id, entity_type, geographical_entity_id)
+                        VALUES (%s, 'biological_entity', %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (bio_id, full_geo_id)
+                    )
+
+        return bio_id
+    
+    def _process_biological_entity(self, common_name, scientific_name, source):
+        """Вспомогательный метод для обработки биологической сущности"""
+        if not common_name and not scientific_name:
+            return None
+        
+        # Нормализуем названия
+        if common_name:
+            common_name = self.normalize_species_name(common_name)
+        
+        bio_id = self.find_biological_entity(common_name, scientific_name)
+        if bio_id:
+            return bio_id
+            
+        # Создаем новую биологическую сущность
+        self.cur.execute(
+            """
+            INSERT INTO biological_entity 
+            (common_name_ru, scientific_name) 
+            VALUES (%s, %s) 
+            RETURNING id
+            """,
+            (common_name, scientific_name)
+        )
+        bio_id = self.cur.fetchone()[0]
+        
+        # Обновляем кэш
+        for name in filter(None, [common_name, scientific_name]):
+            self.bio_entity_cache[name] = bio_id
+            
+        self.add_reliability('biological_entity', bio_id, source)
+        
+        # Создаем идентификатор
+        self.cur.execute(
+            """
+            INSERT INTO entity_identifier 
+            (name_ru, name_latin) 
+            VALUES (%s, %s) 
+            RETURNING id
+            """,
+            (common_name, scientific_name)
+        )
+        ident_id = self.cur.fetchone()[0]
+        
+        self.cur.execute(
+            """
+            INSERT INTO entity_identifier_link
+            (entity_id, entity_type, identifier_id)
+            VALUES (%s, 'biological_entity', %s)
+            """,
+            (bio_id, ident_id)
+        )
+        
+        return bio_id
+
+    def get_geo_data(self, geo_name):
+        """Получаем геоданные с учетом различных вариантов написания"""
+        if not hasattr(self, 'geodb_data'):
+            try:
+                with open("/var/www/salut_bot/json_files/geodb.json", 'r') as f:
+                    self.geodb_data = json.load(f)
+            except Exception as e:
+                print(f"Error loading geodb.json: {e}")
+                return None
+        
+        # Прямое совпадение
+        if geo_name in self.geodb_data:
+            return self.geodb_data[geo_name]
+        
+        # Поиск без учета регистра
+        geo_name_lower = geo_name.lower()
+        for name, data in self.geodb_data.items():
+            if name.lower() == geo_name_lower:
+                return data
+        
+        # Поиск по частичному совпадению (ключевые слова)
+        geo_words = set(geo_name_lower.split())
+        best_match = None
+        best_score = 0
+        
+        for name, data in self.geodb_data.items():
+            name_lower = name.lower()
+            name_words = set(name_lower.split())
+            
+            common_words = geo_words.intersection(name_words)
+            score = len(common_words)
+            
+            if score > best_score:
+                best_score = score
+                best_match = data
+        
+        return best_match if best_score >= 2 else None
+
+    def import_resources(self, json_file):
+        """Основной метод импорта с улучшенным управлением транзакциями"""
+        with open(json_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        success_count = 0
+        error_count = 0
+        
+        for i, resource in enumerate(data['resources'], 1):
+            try:
+                print(f"\nProcessing resource {i}/{len(data['resources'])}: {resource.get('type')}")
+                
+                rtype = resource['type']
+                if rtype == 'Изображение':
+                    result = self.process_image(resource)
+                elif rtype == 'Текст':
+                    result = self.process_text(resource)
+                elif rtype == 'Картографическая информация':
+                    result = self.process_map(resource)
+                elif rtype == 'Географический объект':
+                    result = self.process_geographical_object(resource)
+                else:
+                    print(f"Unknown resource type: {rtype}")
+                    result = None
+                
+                if result:
+                    self.conn.commit()
+                    success_count += 1
+                else:
+                    self.conn.rollback()
+                    error_count += 1
+                
+            except Exception as e:
+                print(f"Error processing resource {i}: {e}")
+                import traceback
+                traceback.print_exc()
+                self.conn.rollback()
+                error_count += 1
+                # Сброс кэшей при ошибке
+                self.entity_cache = {}
+                self.author_cache = {}
+                self.bio_entity_cache = {}
+
+        print(f"\nImport completed. Success: {success_count}, Errors: {error_count}")
+            
+    def run(self, json_file):
+        try:
+            self.connect()
+            self.import_resources(json_file)
+            self.save_missing_geometry_objects()
+            print("Импорт успешно завершен!")
+        except Exception as e:
+            print(f"Ошибка импорта: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.disconnect()
+            
+if __name__ == "__main__":
+    importer = NewResourceImporter()
+    try:
+        importer.connect()
+        importer.import_resources("../../faiss_index_path/resources_dist.json")
+        importer.save_missing_geometry_objects()
+    finally:
+        importer.disconnect()

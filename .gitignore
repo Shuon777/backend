@@ -1,0 +1,94 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Images and media files
+images/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Embedding models (большие файлы)
+embedding_models/
+
+# FAISS index files (могут быть большими)
+*.faiss
+*.pkl
+
+# Environment variables
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints
+
+# Temporary files
+*.tmp
+*.temp
+
+# Database files (если есть локальные БД)
+*.db
+*.sqlite3
+
+# Large data files
+*.csv
+*.jsonl
+*.parquet
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+project_structure.txt
+knowledge_base_scripts/Relational/pgvector/
+
+**/faiss_index_path/
+**/json_files/
+
+**/missing_geometry_objects.json
+**/OFF.xlsx

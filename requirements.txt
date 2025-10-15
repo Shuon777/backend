@@ -1,0 +1,13 @@
+pydantic
+langchain-community
+langchain-core
+pymorphy3
+yargy
+sentence-transformers
+faiss-cpu
+langchain-gigachat
+flask
+flask_cors
+
+
+
