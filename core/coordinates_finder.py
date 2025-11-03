@@ -51,13 +51,13 @@ class GeoProcessor:
     def generate_folium_map(self, geometry: BaseGeometry, place_name: str) -> str:
         if geometry.geom_type == "Point":
             lat, lon = geometry.y, geometry.x
-            m = folium.Map(location=[lat, lon], zoom_start=10, tiles='OpenStreetMap')
+            m = folium.Map(location=[lat, lon], zoom_start=10, tiles='CartoDB positron', attributionControl=False)
             folium.Marker([lat, lon], popup=place_name).add_to(m)
         else:
             bounds = geometry.bounds
             center_lat = (bounds[1] + bounds[3]) / 2
             center_lon = (bounds[0] + bounds[2]) / 2
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles='OpenStreetMap')
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles='OpenStreetMap', attributionControl=False)
             folium.GeoJson(
                 geometry.__geo_interface__,
                 name=place_name,
@@ -94,9 +94,15 @@ class GeoProcessor:
         plt.tight_layout(pad=0)
 
         # Сохранение карты
-        filename = f"{place_name}.png"
+        filename = f"{place_name}.jpeg"  # 1. Меняем расширение файла на .jpeg
         image_path = os.path.join(self.maps_dir, filename)
-        plt.savefig(image_path, dpi=250, bbox_inches='tight', pad_inches=0)
+        plt.savefig(
+            image_path,
+            format='jpeg',         # 2. Указываем формат JPEG
+            dpi=180,               # 3. Снижаем DPI до 150 (разумный компромисс)          # 4. Устанавливаем качество JPEG (85 - хороший баланс)
+            bbox_inches='tight',
+            pad_inches=0
+        )
         plt.close()
 
         static_map_url = f"{self.domain}/maps/{filename}"
@@ -286,7 +292,7 @@ class GeoProcessor:
 
         # --- Создание интерактивной карты Folium ---
         centroid = combined_static.centroid
-        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=9, tiles="OpenStreetMap")
+        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=9, tiles="OpenStreetMap", attributionControl=False)
 
         # Добавляем геометрии с кастомными tooltip и popup
         for geom, tooltip_text, popup_html in zip(geometries, tooltips, popups):
@@ -333,7 +339,7 @@ class GeoProcessor:
         static_map, _ = self.draw_geometry(combined, name)
 
         centroid = combined.centroid
-        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=9, tiles="OpenStreetMap")
+        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=9, tiles="OpenStreetMap", attributionControl=False)
 
         for geom, title in zip(geometries, names):
             folium.GeoJson(

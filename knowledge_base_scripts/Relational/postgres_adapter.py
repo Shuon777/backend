@@ -63,8 +63,6 @@ class NewResourceImporter:
         except Exception as e:
             print(f"Error loading embedding model: {e}")
             return None
-    
-    from embedding_config import get_model_dimension
 
     def generate_embedding(self, text):
         """Генерация эмбеддинга для текста"""
@@ -156,8 +154,7 @@ class NewResourceImporter:
         if best_score >= 2:  # Минимум 2 общих слова
             return best_match
         
-        # Если ничего не найдено, добавляем в список отсутствующих
-        self.missing_geometry_objects.add(geo_name)
+        # ВАЖНО: НЕ добавляем в missing_geometry_objects здесь!
         return None
     
     def process_geo_mention(self, source_id, source_type, geo_name, name_info):
@@ -282,7 +279,7 @@ class NewResourceImporter:
     def load_species_synonyms(self):
         """Загрузка синонимов видов из JSON-файла"""
         try:
-            with open(self.species_synonyms_path, 'r', encoding='utf-8') as f:  # Исправленный путь
+            with open(self.species_synonyms_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             print(f"Файл синонимов {self.species_synonyms_path} не найден. Будет использован пустой словарь.")
@@ -403,17 +400,30 @@ class NewResourceImporter:
         except Exception as e:
             print(f"Error adding reliability: {e}")
 
-    def create_entity_identifier(self, entity_id, entity_type, identificator, access):
-        """Создаем идентификаторы сущностей"""
+    def create_entity_identifier(self, entity_id, entity_type, identificator, access_or_meta):
+        """Создаем идентификаторы сущностей с поддержкой meta_info"""
         name_info = identificator.get('name', {})
         try:
+            # Определяем, переданы ли access_options или meta_info
+            if 'url' in access_or_meta or 'external_title' in access_or_meta:
+                # Это meta_info
+                meta_info = access_or_meta
+                source_url = meta_info.get('url')
+                external_title = meta_info.get('external_title')
+                video_url = meta_info.get('video')
+            else:
+                # Это access_options (старый формат)
+                source_url = access_or_meta.get('source_url')
+                external_title = access_or_meta.get('original_title')
+                video_url = None
+
             self.cur.execute(
                 "INSERT INTO entity_identifier (url, file_path, name_ru, name_en, name_latin) "
                 "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                 (
-                    access.get('source_url'),
-                    access.get('file_path'),
-                    name_info.get('common'),
+                    source_url,
+                    access_or_meta.get('file_path'),  # Может быть в обоих форматах
+                    name_info.get('common') or external_title,
                     name_info.get('en_name'),
                     name_info.get('scientific')
                 )
@@ -426,10 +436,45 @@ class NewResourceImporter:
                 (entity_id, entity_type, identifier_id)
             )
             
+            # Если есть video URL, создаем external_link
+            video_url = access_or_meta.get('video')
+            if video_url:
+                self.cur.execute(
+                    "INSERT INTO external_link (url, title, link_type, platform) "
+                    "VALUES (%s, %s, %s, %s) RETURNING id",
+                    (
+                        video_url,
+                        f"Видео: {name_info.get('common') or external_title}",
+                        'video',
+                        self._detect_video_platform(video_url)
+                    )
+                )
+                external_link_id = self.cur.fetchone()[0]
+                
+                # Связываем external_link с entity_identifier
+                self.cur.execute(
+                    "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (identifier_id, 'entity_identifier', external_link_id, 'external_link', 'ссылка на видео')
+                )
+            
             return identifier_id
         except Exception as e:
             print(f"Error creating entity identifier: {e}")
             return None
+
+    def _detect_video_platform(self, url):
+        """Определяет платформу видео по URL"""
+        if 'youtube.com' in url or 'youtu.be' in url:
+            return 'YouTube'
+        elif 'rutube.ru' in url:
+            return 'Rutube'
+        elif 'vk.com' in url:
+            return 'VK'
+        elif 'dzen.ru' in url:
+            return 'Yandex.Dzen'
+        else:
+            return 'Other'
 
     def get_title(self, resource):
         """Получаем заголовок из различных источников с приоритетом"""
@@ -532,7 +577,7 @@ class NewResourceImporter:
             coords = location.get('coordinates', {})
             lat = self.clean_coordinate(coords.get('latitude'))
             lon = self.clean_coordinate(coords.get('longitude'))
-            #print(location)
+            
             if lat is None or lon is None:
                 print(f"Warning: Invalid coordinates for {entity_type} {entity_id}")
                 return None
@@ -599,6 +644,361 @@ class NewResourceImporter:
         except Exception as e:
             print(f"Error processing geographical data for {entity_type} {entity_id}: {e}")
             return None
+
+    def extract_settlements_and_natural_objects(self, resource):
+        """
+        Извлекает населенные пункты и природные объекты из географического объекта
+        Возвращает список словарей с информацией об объектах
+        """
+        settlements = []
+        natural_objects = []
+        
+        try:
+            feature_data = resource.get('feature_data', {})
+            location_info = feature_data.get('location_info', {})
+            
+            # 1. Извлекаем населенный пункт из exact_location
+            exact_location = location_info.get('exact_location', '')
+            if exact_location:
+                settlement = self._parse_settlement_from_location(exact_location)
+                if settlement and settlement not in settlements:
+                    settlements.append(settlement)
+            
+            # 2. Извлекаем регион (может содержать населенные пункты)
+            region = location_info.get('region', '')
+            if region:
+                region_settlement = self._parse_settlement_from_region(region)
+                if region_settlement and region_settlement not in settlements:
+                    settlements.append(region_settlement)
+            
+            # 3. Извлекаем природные объекты из nearby_places
+            nearby_places = location_info.get('nearby_places', [])
+            for place in nearby_places:
+                if isinstance(place, dict):
+                    place_name = place.get('name', '')
+                    place_type = place.get('type', '')
+                    
+                    if self._is_natural_object(place_type):
+                        natural_obj = {
+                            'name': place_name,
+                            'type': place_type,
+                            'relation': place.get('relation', ''),
+                            'source': 'nearby_places'
+                        }
+                        if natural_obj not in natural_objects:
+                            natural_objects.append(natural_obj)
+            
+            return {
+                'settlements': settlements,
+                'natural_objects': natural_objects
+            }
+            
+        except Exception as e:
+            print(f"Error extracting settlements and natural objects: {e}")
+            return {'settlements': [], 'natural_objects': []}
+    
+    def _parse_settlement_from_location(self, location_str):
+        """Парсит населенный пункт из строки местоположения"""
+        if not location_str:
+            return None
+            
+        # Паттерны для извлечения населенных пунктов
+        patterns = [
+            r'город\s+([^,]+)',  # "город Бодайбо"
+            r'г\.\s*([^,]+)',    # "г. Бодайбо"
+            r'посёлок\s+([^,]+)', # "посёлок Таксимо"
+            r'п\.\s*([^,]+)',     # "п. Таксимо"
+            r'село\s+([^,]+)',    # "село Танхой"
+            r'с\.\s*([^,]+)',     # "с. Танхой"
+            r'деревня\s+([^,]+)', # "деревня Листвянка"
+            r'д\.\s*([^,]+)',     # "д. Листвянка"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, location_str.lower())
+            if match:
+                settlement_name = match.group(1).strip()
+                # Определяем тип населенного пункта
+                settlement_type = self._determine_settlement_type(pattern)
+                return {
+                    'name': settlement_name.title(),
+                    'type': settlement_type,
+                    'source': 'exact_location'
+                }
+        
+        # Если не нашли по паттернам, пробуем взять первое слово до запятой
+        if ',' in location_str:
+            first_part = location_str.split(',')[0].strip()
+            if any(word in first_part.lower() for word in ['город', 'посёлок', 'село', 'деревня']):
+                return None  # Пропускаем, если есть указание типа но не распарсилось
+            return {
+                'name': first_part,
+                'type': 'Населенные пункты',
+                'source': 'exact_location'
+            }
+        
+        return None
+    
+    def _parse_settlement_from_region(self, region_str):
+        """Парсит населенный пункт из названия региона"""
+        if not region_str:
+            return None
+            
+        # Проверяем, является ли регион населенным пунктом
+        region_lower = region_str.lower()
+        
+        # Список суффиксов, указывающих на район (не населенный пункт)
+        district_indicators = ['ский район', 'кой район', 'ой район', 'район', 'ский р-н', 'кой р-н']
+        
+        if any(indicator in region_lower for indicator in district_indicators):
+            return None  # Это район, а не населенный пункт
+        
+        # Если в регионе нет указания на район, возможно это населенный пункт
+        return {
+            'name': region_str,
+            'type': 'Населенные пункты',
+            'source': 'region'
+        }
+    
+    def _determine_settlement_type(self, pattern):
+        """Определяет тип населенного пункта по паттерну"""
+        type_mapping = {
+            r'город\s+([^,]+)': 'город',
+            r'г\.\s*([^,]+)': 'город',
+            r'посёлок\s+([^,]+)': 'посёлок',
+            r'п\.\s*([^,]+)': 'посёлок',
+            r'село\s+([^,]+)': 'село',
+            r'с\.\s*([^,]+)': 'село',
+            r'деревня\s+([^,]+)': 'деревня',
+            r'д\.\s*([^,]+)': 'деревня'
+        }
+        
+        return type_mapping.get(pattern, 'населенный пункт')
+    
+    def _is_natural_object(self, object_type):
+        """Проверяет, является ли объект природным"""
+        natural_types = [
+            'река', 'озеро', 'гора', 'хребет', 'лес', 'поле', 'долина',
+            'водопад', 'источник', 'бухта', 'залив', 'мыс', 'остров',
+            'пещера', 'ущелье', 'каньон', 'плато', 'вулкан'
+        ]
+        
+        return object_type.lower() in natural_types
+    
+    def check_duplicate_geographical_entity(self, name, entity_type=None):
+        """
+        Проверяет, существует ли уже географический объект с таким названием
+        Возвращает ID если найден, иначе None
+        """
+        try:
+            if entity_type:
+                self.cur.execute(
+                    "SELECT id FROM geographical_entity WHERE name_ru = %s AND type = %s",
+                    (name, entity_type)
+                )
+            else:
+                self.cur.execute(
+                    "SELECT id FROM geographical_entity WHERE name_ru = %s",
+                    (name,)
+                )
+            
+            result = self.cur.fetchone()
+            return result[0] if result else None
+            
+        except Exception as e:
+            print(f"Error checking duplicate for {name}: {e}")
+            return None
+    
+
+    def create_settlement_entity(self, settlement_info):
+        """Создает географическую сущность для населенного пункта с координатами из geodb.json"""
+        try:
+            name = settlement_info['name']
+            settlement_type = settlement_info['type']
+            
+            # Проверяем дубликат
+            existing_id = self.check_duplicate_geographical_entity(name, 'населенный пункт')
+            if existing_id:
+                print(f"Населенный пункт '{name}' уже существует (id: {existing_id})")
+                return existing_id
+            
+            # Ищем геоданные в geodb.json
+            geo_data = self.get_geo_data(name)
+            feature_data = {}
+            
+            if geo_data:
+                feature_data = {
+                    'source': 'geodb.json',
+                    'original_name': name,
+                    'geodb_data': geo_data.get('properties', {}),
+                    'has_precise_geometry': 'geometry' in geo_data
+                }
+            
+            # Создаем новую сущность
+            self.cur.execute(
+                "INSERT INTO geographical_entity (name_ru, type, description, feature_data) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (
+                    name,
+                    'Населенные пункты',
+                    f"{settlement_type.capitalize()} {name}",
+                    Json(feature_data) if feature_data else None
+                )
+            )
+            settlement_id = self.cur.fetchone()[0]
+            
+            # Добавляем информацию о достоверности
+            self.add_reliability('geographical_entity', settlement_id, settlement_info['source'])
+            
+            # Создаем map_content с геометрией из geodb.json, если есть
+            if geo_data and 'geometry' in geo_data:
+                self._create_map_content_for_entity(
+                    settlement_id, 
+                    'geographical_entity', 
+                    name, 
+                    geo_data['geometry'],
+                    'Населенные пункты'
+                )
+            else:
+                # ВАЖНО: НЕ добавляем в missing_geometry_objects здесь
+                print(f"⚠️ Для населенного пункта '{name}' не найдена геометрия в geodb.json")
+            
+            print(f"Создан населенный пункт: {name} (тип: {settlement_type}, id: {settlement_id})")
+            return settlement_id
+            
+        except Exception as e:
+            print(f"Error creating settlement entity for {settlement_info}: {e}")
+            return None
+    
+    def create_natural_entity(self, natural_object_info):
+        """Создает географическую сущность для природного объекта с координатами из geodb.json"""
+        try:
+            name = natural_object_info['name']
+            natural_type = natural_object_info['type']
+            
+            # Проверяем дубликат
+            existing_id = self.check_duplicate_geographical_entity(name, natural_type)
+            if existing_id:
+                print(f"Природный объект '{name}' уже существует (id: {existing_id})")
+                return existing_id
+            
+            # Ищем геоданные в geodb.json
+            geo_data = self.get_geo_data(name)
+            feature_data = {}
+            
+            if geo_data:
+                feature_data = {
+                    'source': 'geodb.json',
+                    'original_name': name,
+                    'geodb_data': geo_data.get('properties', {}),
+                    'has_precise_geometry': 'geometry' in geo_data
+                }
+            
+            # Создаем новую сущность
+            self.cur.execute(
+                "INSERT INTO geographical_entity (name_ru, type, description, feature_data) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (
+                    name,
+                    natural_type,
+                    f"{natural_type.capitalize()} {name}",
+                    Json(feature_data) if feature_data else None
+                )
+            )
+            natural_id = self.cur.fetchone()[0]
+            
+            # Добавляем информацию о достоверности
+            self.add_reliability('geographical_entity', natural_id, natural_object_info['source'])
+            
+            # Создаем map_content с геометрией из geodb.json, если есть
+            if geo_data and 'geometry' in geo_data:
+                self._create_map_content_for_entity(
+                    natural_id, 
+                    'geographical_entity', 
+                    name, 
+                    geo_data['geometry'],
+                    natural_type
+                )
+            else:
+                # ВАЖНО: НЕ добавляем в missing_geometry_objects здесь
+                print(f"⚠️ Для природного объекта '{name}' не найдена геометрия в geodb.json")
+            
+            print(f"Создан природный объект: {name} (тип: {natural_type}, id: {natural_id})")
+            return natural_id
+            
+        except Exception as e:
+            print(f"Error creating natural entity for {natural_object_info}: {e}")
+            return None
+
+    def _create_map_content_for_entity(self, entity_id, entity_type, name, geometry, obj_type):
+        """Создает map_content для сущности с геометрией из geodb.json"""
+        try:
+            # Проверяем, существует ли уже map_content для этой геометрии
+            self.cur.execute(
+                """
+                SELECT mc.id FROM map_content mc
+                WHERE ST_Equals(mc.geometry, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
+                LIMIT 1
+                """,
+                (json.dumps(geometry),)
+            )
+            existing_map = self.cur.fetchone()
+            
+            if existing_map:
+                map_id = existing_map[0]
+                print(f"Map content уже существует для {name} (id: {map_id})")
+            else:
+                # Создаем новый map_content
+                self.cur.execute(
+                    """
+                    INSERT INTO map_content (title, geometry, feature_data)
+                    VALUES (%s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s)
+                    RETURNING id
+                    """,
+                    (
+                        f"Геометрия {name}",
+                        json.dumps(geometry),
+                        Json({
+                            'source': 'geodb.json',
+                            f'{entity_type}_id': entity_id,
+                            'type': obj_type,
+                            'original_name': name,
+                            'has_precise_geometry': True
+                        })
+                    )
+                )
+                map_id = self.cur.fetchone()[0]
+                print(f"Создан map_content для {name} (id: {map_id})")
+            
+            # Связываем map_content с географической сущностью
+            self.cur.execute(
+                """
+                INSERT INTO entity_geo 
+                (entity_id, entity_type, geographical_entity_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (map_id, 'map_content', entity_id)
+            )
+            
+            return map_id
+            
+        except Exception as e:
+            print(f"Error creating map content for {name}: {e}")
+            return None
+
+    
+    def _get_natural_object_relation(self, natural_obj):
+        """Определяет тип отношения для природного объекта"""
+        relation_mapping = {
+            'река': 'расположен на берегу',
+            'озеро': 'расположен у',
+            'гора': 'расположен у подножия',
+            'хребет': 'расположен в районе'
+        }
+        
+        return relation_mapping.get(natural_obj['type'], 'расположен рядом с')
+
     def process_geographical_object(self, resource):
         """Обработка географических объектов с созданием текстового описания и связей"""
         try:
@@ -611,9 +1011,10 @@ class NewResourceImporter:
             description = resource.get('description', '')
             coordinates = resource.get('coordinates', {})
             
-            # ДЕБАГ: Выводим что пришло в resource
+            # ФИКС: Сохраняем in_stoplist как число
+            in_stoplist_value = resource.get('in_stoplist')
             
-            # Создаем базовый feature_data
+            # Создаем базовый feature_data с in_stoplist
             feature_data = {
                 'source': 'sights.json',
                 'original_name': common_name,
@@ -621,18 +1022,21 @@ class NewResourceImporter:
                 'geo_synonyms': geo_synonyms,
                 'information_type': resource.get('information_type'),
                 'validation_status': resource.get('validation_status'),
-                'validation_result': resource.get('validation_result')
+                'validation_result': resource.get('validation_result'),
+                'baikal_relation': resource.get('baikal_relation'),
+                'blacklist_detected': resource.get('blacklist_detected'),
+                'blacklist_risk': resource.get('blacklist_risk'),
+                'finish_reason': resource.get('finish_reason'),
+                'in_stoplist': in_stoplist_value,  # Сохраняем как число
+                # ДОБАВЛЯЕМ meta_info
+                'meta_info': resource.get('meta_info', {})
             }
-
 
             # Добавляем данные из resource['feature_data'], если они есть
             if 'feature_data' in resource and resource['feature_data']:
-                
-                # Используем глубокое копирование для избежания конфликтов
                 import copy
                 resource_feature_data = copy.deepcopy(resource['feature_data'])
                 feature_data.update(resource_feature_data)
-                
 
             feature_data_json = Json(feature_data)
 
@@ -650,26 +1054,15 @@ class NewResourceImporter:
             geo_id = self.cur.fetchone()[0]
             entity_type = 'geographical_entity'
             
-            # ДЕБАГ: Проверяем что реально записалось в базу
-            self.cur.execute(
-                "SELECT feature_data FROM geographical_entity WHERE id = %s",
-                (geo_id,)
-            )
-            saved_data = self.cur.fetchone()[0]
-            print(f"🔍 ДЕБАГ сохранено в БД keys: {list(saved_data.keys()) if saved_data else 'NO DATA'}")
-            print(f"🔍 ДЕБАГ сохранено location_info: {'location_info' in saved_data if saved_data else False}")
-            print(f"🔍 ДЕБАГ сохранено geo_type: {'geo_type' in saved_data if saved_data else False}")
-            print(f"🔍 ДЕБАГ сохранено flora_fauna_relations: {'flora_fauna_relations' in saved_data if saved_data else False}")
-            
             self.add_reliability('geographical_entity', geo_id, name_info.get('source'))
             
-            # 2. Создаем текстовое описание с эмбеддингом
             text_content_id = self._create_geographical_text_content(
                 common_name, 
                 description, 
                 geo_entity_type,
                 coordinates,
-                name_info.get('source')
+                name_info.get('source'),
+                resource.get('meta_info')  # Добавляем meta_info
             )
             
             # 3. Создаем связь между текстовым описанием и географической сущностью
@@ -680,15 +1073,32 @@ class NewResourceImporter:
                     (text_content_id, 'text_content', geo_id, entity_type, 'описание объекта')
                 )
             
-            # 4. Создаем идентификатор
-            self.create_entity_identifier(geo_id, entity_type, identificator, {})
+            # 4. Создаем идентификатор с учетом meta_info
+            self.create_entity_identifier(geo_id, entity_type, identificator, resource.get('meta_info', {}))
             
-            # 5. Обрабатываем координаты для создания map_content
             lat = self.clean_coordinate(coordinates.get('latitude'))
             lon = self.clean_coordinate(coordinates.get('longitude'))
             
-            if lat is not None and lon is not None:
-                # Создаем map_content с точкой
+            # Пробуем найти геометрию в geodb.json
+            geo_data = None
+            for geo_name in [common_name] + geo_synonyms:
+                geo_data = self.get_geo_data(geo_name)
+                if geo_data and 'geometry' in geo_data:
+                    break
+            
+            has_geometry = False
+            if geo_data and 'geometry' in geo_data:
+                # Используем геометрию из geodb.json (приоритет)
+                self._create_map_content_for_entity(
+                    geo_id,
+                    'geographical_entity',
+                    common_name,
+                    geo_data['geometry'],
+                    geo_entity_type
+                )
+                has_geometry = True
+            elif lat is not None and lon is not None:
+                # Используем точечные координаты из ресурса (резервный вариант)
                 self.cur.execute(
                     "INSERT INTO map_content (title, geometry, feature_data) "
                     "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s) RETURNING id",
@@ -697,11 +1107,12 @@ class NewResourceImporter:
                         lon,
                         lat,
                         Json({
-                            'source': 'sights.json',
+                            'source': 'resource_coordinates', 
                             'geo_entity_id': geo_id,
                             'type': geo_entity_type,
                             'original_name': common_name,
-                            'description_preview': description[:200] + '...' if len(description) > 200 else description
+                            'has_precise_geometry': False,
+                            'meta_info': resource.get('meta_info', {})  # Добавляем meta_info
                         })
                     )
                 )
@@ -713,11 +1124,43 @@ class NewResourceImporter:
                     "VALUES (%s, %s, %s)",
                     (map_id, 'map_content', geo_id)
                 )
+                has_geometry = True
+            
+            # 5. Только если нет геометрии вообще - добавляем в missing_geometry_objects
+            if not has_geometry:
+                self.missing_geometry_objects.add(common_name)
+                print(f"⚠️ Для географического объекта '{common_name}' не найдена геометрия")
             
             # 6. Обрабатываем дополнительные geo_synonyms
             for geo_name in geo_synonyms:
                 if geo_name and geo_name != common_name:
                     self.process_geo_mention(geo_id, entity_type, geo_name, name_info)
+            
+            # 7. Извлекаем и создаем населенные пункты и природные объекты
+            extracted_objects = self.extract_settlements_and_natural_objects(resource)
+            
+            # Создаем населенные пункты
+            for settlement in extracted_objects['settlements']:
+                settlement_id = self.create_settlement_entity(settlement)
+                if settlement_id:
+                    # Создаем связь между основным объектом и населенным пунктом
+                    self.cur.execute(
+                        "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                        (geo_id, 'geographical_entity', settlement_id, 'geographical_entity', 'расположен в')
+                    )
+            
+            # Создаем природные объекты
+            for natural_obj in extracted_objects['natural_objects']:
+                natural_id = self.create_natural_entity(natural_obj)
+                if natural_id:
+                    # Создаем связь между основным объектом и природным объектом
+                    relation_type = self._get_natural_object_relation(natural_obj)
+                    self.cur.execute(
+                        "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                        (geo_id, 'geographical_entity', natural_id, 'geographical_entity', relation_type)
+                    )
             
             print(f"✅ Создан географический объект: {common_name} (тип: {geo_entity_type}, id: {geo_id})")
             return geo_id
@@ -728,8 +1171,8 @@ class NewResourceImporter:
             traceback.print_exc()
             return None
 
-    def _create_geographical_text_content(self, name, description, geo_type, coordinates, source):
-        """Создает текстовое описание для географического объекта с эмбеддингом"""
+    def _create_geographical_text_content(self, name, description, geo_type, coordinates, source, meta_info=None):
+        """Создает текстовое описание для географического объекта с эмбеддингом и meta_info"""
         try:
             # Формируем структурированные данные
             structured_data = {
@@ -741,7 +1184,8 @@ class NewResourceImporter:
                 },
                 "metadata": {
                     "source": source,
-                    "import_timestamp": datetime.now().isoformat()
+                    "import_timestamp": datetime.now().isoformat(),
+                    "meta_info": meta_info or {}  # Добавляем meta_info
                 }
             }
             
@@ -784,7 +1228,7 @@ class NewResourceImporter:
             
         except Exception as e:
             print(f"Error creating geographical text content: {e}")
-            return Noneы
+            return None
         
     def process_text(self, resource):
         """Обработка текстовых ресурсов с генерацией эмбеддингов и structured_data"""
@@ -796,9 +1240,28 @@ class NewResourceImporter:
             title = self.get_title(resource)
             structured_data = resource.get('structured_data')
             
+            # ФИКС: Сохраняем in_stoplist как число
+            in_stoplist_value = resource.get('in_stoplist')
+            
+            # Собираем feature_data для текстового контента
+            feature_data = {
+                'in_stoplist': in_stoplist_value,  # Сохраняем как число
+                'information_type': resource.get('information_type'),
+                'source': name_info.get('source')
+            }
+            
+            # Добавляем дополнительные поля, если они есть
+            if 'validation_status' in resource:
+                feature_data['validation_status'] = resource.get('validation_status')
+            if 'validation_result' in resource:
+                feature_data['validation_result'] = resource.get('validation_result')
+            
+            feature_data_json = Json(feature_data) if feature_data else None
+            
             # Логируем полученные данные для отладки
             print(f"Processing text: {title}")
             print(f"Has structured_data: {structured_data is not None}")
+            print(f"in_stoplist: {in_stoplist_value}")
             
             # Генерируем эмбеддинг только из заголовка, если есть structured_data
             # Или из комбинации заголовка и контента, если structured_data нет
@@ -826,13 +1289,14 @@ class NewResourceImporter:
             
             # Вставляем данные в базу - content только если нет structured_data
             self.cur.execute(
-                "INSERT INTO text_content (title, content, structured_data, description, embedding) "
-                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                "INSERT INTO text_content (title, content, structured_data, description, feature_data, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     title,
                     None if structured_data else resource.get('content', ''),  # content только если нет structured_data
                     structured_data_json,
                     resource.get('brief_annotation', ''),
+                    feature_data_json,
                     embedding  
                 )
             )
@@ -871,9 +1335,14 @@ class NewResourceImporter:
                     if not bio_id:
                         # Создаем новую биологическую сущность
                         self.cur.execute(
-                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description) "
-                            "VALUES (%s, %s, %s) RETURNING id",
-                            (common_name, scientific_name, f"Автоматически создано из текста: {title}")
+                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description, feature_data) "
+                            "VALUES (%s, %s, %s, %s) RETURNING id",
+                            (
+                                common_name, 
+                                scientific_name, 
+                                f"Автоматически создано из текста: {title}",
+                                Json({'in_stoplist': in_stoplist_value})  # Сохраняем как число
+                            )
                         )
                         bio_id = self.cur.fetchone()[0]
                         
@@ -892,13 +1361,13 @@ class NewResourceImporter:
                         (text_id, entity_type, bio_id, 'biological_entity', 'описание объекта')
                     )
             
-            print(f"Successfully processed text ID: {text_id}")
+            print(f"Successfully processed text ID: {text_id}, in_stoplist: {in_stoplist_value}")
             return text_id
             
         except Exception as e:
             print(f"Error processing text: {e}")
             import traceback
-            traceback.print_exc()  # Добавляем полный traceback для отладки
+            traceback.print_exc()
             return None
             
     def process_image(self, resource):
@@ -911,13 +1380,20 @@ class NewResourceImporter:
             
             title = self.get_title(resource)
             
+            # ФИКС: Сохраняем in_stoplist как число
+            in_stoplist_value = resource.get('in_stoplist')
+            
+            # Добавляем in_stoplist в feature_data изображения
+            image_feature_data = feature_photo.copy() if feature_photo else {}
+            image_feature_data['in_stoplist'] = in_stoplist_value  # Сохраняем как число
+            
             self.cur.execute(
                 "INSERT INTO image_content (title, description, feature_data) "
                 "VALUES (%s, %s, %s) RETURNING id",
                 (
                     title,
                     feature_photo.get('image_caption'),
-                    Json(feature_photo)
+                    Json(image_feature_data)
                 )
             )
             image_id = self.cur.fetchone()[0]
@@ -925,6 +1401,8 @@ class NewResourceImporter:
             
             self.add_reliability('image_content', image_id, name_info.get('source'))
             self.create_entity_identifier(image_id, entity_type, identificator, access)
+            
+            # ... остальной код метода без изменений
             
             author_name = access.get('author')
             if author_name:
@@ -1006,7 +1484,7 @@ class NewResourceImporter:
         """Унифицируем регистр названий"""
         if not name:
             return name
-        return name.strip().lower()  # Приводим к нижнему регистру
+        return name.strip().lower()
 
     def _get_biological_name_from_map(self, resource):
         """Получает название биологической сущности для карт с приоритетом plant_russian_name"""
@@ -1040,7 +1518,8 @@ class NewResourceImporter:
         bio_id = self._process_biological_entity(
             common_name,
             resource.get('plant_latin_name'),
-            name_info.get('source')
+            name_info.get('source'),
+            resource.get('in_stoplist', False)
         )
 
         # Обрабатываем все географические объекты
@@ -1116,7 +1595,7 @@ class NewResourceImporter:
 
         return bio_id
     
-    def _process_biological_entity(self, common_name, scientific_name, source):
+    def _process_biological_entity(self, common_name, scientific_name, source, in_stoplist_value=None):
         """Вспомогательный метод для обработки биологической сущности"""
         if not common_name and not scientific_name:
             return None
@@ -1130,14 +1609,18 @@ class NewResourceImporter:
             return bio_id
             
         # Создаем новую биологическую сущность
+        feature_data = {}
+        if in_stoplist_value is not None:
+            feature_data['in_stoplist'] = in_stoplist_value  # Сохраняем как число
+        
         self.cur.execute(
             """
             INSERT INTO biological_entity 
-            (common_name_ru, scientific_name) 
-            VALUES (%s, %s) 
+            (common_name_ru, scientific_name, feature_data) 
+            VALUES (%s, %s, %s) 
             RETURNING id
             """,
-            (common_name, scientific_name)
+            (common_name, scientific_name, Json(feature_data) if feature_data else None)
         )
         bio_id = self.cur.fetchone()[0]
         
@@ -1169,44 +1652,6 @@ class NewResourceImporter:
         )
         
         return bio_id
-
-    def get_geo_data(self, geo_name):
-        """Получаем геоданные с учетом различных вариантов написания"""
-        if not hasattr(self, 'geodb_data'):
-            try:
-                with open("/var/www/salut_bot/json_files/geodb.json", 'r') as f:
-                    self.geodb_data = json.load(f)
-            except Exception as e:
-                print(f"Error loading geodb.json: {e}")
-                return None
-        
-        # Прямое совпадение
-        if geo_name in self.geodb_data:
-            return self.geodb_data[geo_name]
-        
-        # Поиск без учета регистра
-        geo_name_lower = geo_name.lower()
-        for name, data in self.geodb_data.items():
-            if name.lower() == geo_name_lower:
-                return data
-        
-        # Поиск по частичному совпадению (ключевые слова)
-        geo_words = set(geo_name_lower.split())
-        best_match = None
-        best_score = 0
-        
-        for name, data in self.geodb_data.items():
-            name_lower = name.lower()
-            name_words = set(name_lower.split())
-            
-            common_words = geo_words.intersection(name_words)
-            score = len(common_words)
-            
-            if score > best_score:
-                best_score = score
-                best_match = data
-        
-        return best_match if best_score >= 2 else None
 
     def import_resources(self, json_file):
         """Основной метод импорта с улучшенным управлением транзакциями"""

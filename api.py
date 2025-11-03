@@ -17,6 +17,9 @@ from core.relational_service import RelationalService
 from embedding_config import embedding_config
 import json
 
+matplotlib_logger = logging.getLogger('matplotlib')
+matplotlib_logger.setLevel(logging.WARNING)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -46,6 +49,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+matplotlib_logger = logging.getLogger('matplotlib')
+matplotlib_logger.setLevel(logging.WARNING)
 
 @app.route("/find_place", methods=["POST"])
 def find_place():
@@ -156,6 +161,9 @@ def objects_in_polygon():
 @app.route("/objects_in_polygon_simply", methods=["POST"])
 def objects_in_polygon_simply():
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+    in_stoplist = request.args.get("in_stoplist", "1")  # Новый параметр
+    logger.info(f"📦 /objects_in_polygon_simply - GET params: {dict(request.args)}")
+    logger.info(f"📦 /objects_in_polygon_simply - POST data: {request.get_json()}")
     debug_info = {
         "timestamp": time.time(),
         "steps": []
@@ -172,7 +180,8 @@ def objects_in_polygon_simply():
         "name": name,
         "buffer_radius_km": buffer_radius_km,
         "object_type": object_type,
-        "limit": limit
+        "limit": limit,
+        "in_stoplist": in_stoplist
     }
     
     # Проверяем синонимы перед поиском геометрии
@@ -242,11 +251,47 @@ def objects_in_polygon_simply():
         objects = results.get("objects", [])
         answer = results.get("answer", "")
         
+        # ФИЛЬТРАЦИЯ ПО STOPLIST для найденных объектов
+        safe_objects = []
+        stoplisted_objects = []
+        
+        for obj in objects:
+            # Проверяем feature_data объектов на in_stoplist
+            feature_data = obj.get("features", {})
+            obj_in_stoplist = feature_data.get("in_stoplist")
+            
+            try:
+                requested_level = int(in_stoplist)
+                if obj_in_stoplist is None or int(obj_in_stoplist) <= requested_level:
+                    safe_objects.append(obj)
+                else:
+                    stoplisted_objects.append(obj)
+                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+            except (ValueError, TypeError):
+                if obj_in_stoplist is None or int(obj_in_stoplist) <= 1:
+                    safe_objects.append(obj)
+                else:
+                    stoplisted_objects.append(obj)
+                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+        
+        objects = safe_objects
+        
+        # Обновляем ответ с учетом фильтрации
+        if stoplisted_objects:
+            answer = f"{answer} (исключено {len(stoplisted_objects)} объектов по уровню безопасности)"
+        
         # Debug информация о результатах поиска
         debug_info["search_results"] = {
             "total_objects": len(objects),
             "object_types": {},
             "polygon_area": "calculated" if polygon else "unknown"
+        }
+        
+        # Debug информация о фильтрации stoplist
+        debug_info["stoplist_filter"] = {
+            "total_before_filter": len(results.get("objects", [])),
+            "safe_after_filter": len(objects),
+            "stoplisted_count": len(stoplisted_objects)
         }
         
         # Статистика по типам объектов
@@ -281,6 +326,8 @@ def objects_in_polygon_simply():
         response = {"status": "no_objects", "message": answer}
         if debug_mode:
             response["debug"] = debug_info
+            response["in_stoplist_filter_applied"] = True
+            response["in_stoplist_level"] = in_stoplist
         return jsonify(response)
 
     # Собираем полный список имен для ответа
@@ -347,6 +394,11 @@ def objects_in_polygon_simply():
         map_result["grouped_names"] = [obj.get("tooltip", "") for obj in objects_for_map]
         map_result["all_biological_names"] = all_biological_names
         
+        # Добавляем информацию о фильтрации по stoplist
+        map_result["in_stoplist_filter_applied"] = True
+        map_result["in_stoplist_level"] = in_stoplist
+        map_result["stoplisted_count"] = len(stoplisted_objects) if 'stoplisted_objects' in locals() else 0
+        
         # Добавляем debug информацию
         if debug_mode:
             debug_info["visualization"] = {
@@ -364,8 +416,418 @@ def objects_in_polygon_simply():
         response = {"status": "error", "message": f"Ошибка отрисовки карты: {e}"}
         if debug_mode:
             response["debug"] = debug_info
+            response["in_stoplist_filter_applied"] = True
+            response["in_stoplist_level"] = in_stoplist
         return jsonify(response), 500
     
+@app.route("/objects_in_area_by_type", methods=["POST"])
+def objects_in_area_by_type():
+    debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+    debug_info = {
+        "timestamp": time.time(),
+        "steps": []
+    }
+    logger.info(f"📦 /objects_in_area_by_type - GET params: {dict(request.args)}")
+    logger.info(f"📦 /objects_in_area_by_type - POST data: {request.get_json()}")
+    
+    data = request.get_json()
+    area_name = data.get("area_name")
+    object_type = data.get("object_type", "all")  # Добавляем значение по умолчанию
+    object_subtype = data.get("object_subtype")
+    object_name = data.get("object_name")
+    limit = data.get("limit", 20)
+    search_around = data.get("search_around", False)
+    buffer_radius_km = data.get("buffer_radius_km", 10.0)
+    
+    # Debug информация о параметрах
+    debug_info["parameters"] = {
+        "area_name": area_name,
+        "object_type": object_type,
+        "object_subtype": object_subtype,
+        "object_name": object_name,
+        "limit": limit,
+        "search_around": search_around,
+        "buffer_radius_km": buffer_radius_km
+    }
+    
+    # РАЗРЕШЕНИЕ СИНОНИМОВ ОБЪЕКТОВ (НОВОЕ)
+    resolved_object_info = None
+    if object_name:
+        resolved_object_info = search_service.resolve_object_synonym(object_name, object_type)
+        
+        debug_info["synonym_resolution"] = {
+            "original_name": object_name,
+            "original_type": object_type,
+            "resolved_info": resolved_object_info
+        }
+        
+        if resolved_object_info.get("resolved", False):
+            object_name = resolved_object_info["main_form"]
+            # Не меняем object_type, если он не был передан изначально
+            if object_type != "all":
+                object_type = resolved_object_info["object_type"]
+            logger.info(f"✅ Разрешен синоним объекта: '{resolved_object_info['original_name']}' -> '{object_name}' (тип: {object_type})")
+        else:
+            logger.info(f"ℹ️ Синоним для объекта '{object_name}' не найден, используем оригинальное название")
+    
+    def extract_external_id(feature_data):
+        """Извлекает external_id из feature_data"""
+        if not feature_data:
+            return None
+        
+        # Пробуем разные пути к external_id
+        if isinstance(feature_data, dict):
+            # Прямо в meta_info -> external_id
+            if 'meta_info' in feature_data and feature_data['meta_info']:
+                external_id = feature_data['meta_info'].get('external_id')
+                if external_id:
+                    return external_id
+                
+                # Также проверяем meta_info -> id как fallback
+                meta_id = feature_data['meta_info'].get('id')
+                if meta_id:
+                    return meta_id
+            
+            # Прямо в корне feature_data
+            if 'external_id' in feature_data:
+                return feature_data['external_id']
+            
+            # Проверяем другие возможные места
+            if 'id' in feature_data:
+                return feature_data['id']
+                
+            # В других возможных местах
+            for key in ['external_info', 'source_info', 'legacy_data']:
+                if key in feature_data and isinstance(feature_data[key], dict):
+                    external_id = feature_data[key].get('external_id')
+                    if external_id:
+                        return external_id
+        
+        return None
+    
+    # НОВАЯ ЛОГИКА: Если area_name не указан, но есть object_name - ищем объект напрямую
+    if not area_name and object_name:
+        debug_info["steps"].append({
+            "step": "direct_object_search",
+            "reason": "area_name not provided, searching object directly",
+            "resolved_name": object_name,  # Добавляем разрешенное имя
+            "resolved_type": object_type   # Добавляем разрешенный тип
+        })
+        
+        try:
+            # Ищем объект по имени без привязки к области (используем разрешенные имя и тип)
+            results = search_service.search_objects_directly_by_name(
+                object_name=object_name,  # Используем разрешенное имя
+                object_type=object_type,  # Используем разрешенный тип
+                object_subtype=object_subtype,
+                limit=limit
+            )
+            
+            objects = results.get("objects", [])
+            answer = results.get("answer", "")
+            
+            # Debug информация о результатах
+            debug_info["search_results"] = {
+                "total_objects_found": len(objects),
+                "search_type": "direct_object_search"
+            }
+            
+            if not objects:
+                response = {
+                    "status": "no_objects", 
+                    "message": answer
+                }
+                if debug_mode:
+                    response["debug"] = debug_info
+                return jsonify(response)
+            
+            # Подготавливаем объекты для карты (БЕЗ external_id в popup)
+            objects_for_map = []
+            
+            for obj in objects:
+                name = obj.get('name', 'Без имени')
+                description = obj.get('description', '')
+                geojson = obj.get('geojson', {})
+                obj_type = obj.get('type', 'unknown')
+                
+                popup_html = f"<h6>{name}</h6>"
+                if obj_type:
+                    popup_html += f"<p><strong>Тип:</strong> {obj_type}</p>"
+                if description:
+                    short_desc = description[:200] + "..." if len(description) > 200 else description
+                    popup_html += f"<p>{short_desc}</p>"
+                # УБРАНО: отображение external_id в popup
+                
+                objects_for_map.append({
+                    'tooltip': name,
+                    'popup': popup_html,
+                    'geojson': geojson
+                })
+            
+            # Создаем карту
+            map_name = f"direct_search_{object_name.replace(' ', '_')}_{int(time.time())}"
+            map_result = geo.draw_custom_geometries(objects_for_map, map_name)
+            
+            # Подготавливаем детальную информацию с external_id (только в данных)
+            detailed_objects = []
+            for obj in objects:
+                features = obj.get('features', {})
+                external_id = extract_external_id(features)
+                
+                detailed_objects.append({
+                    "name": obj.get('name'), 
+                    "description": obj.get('description'),
+                    "type": obj.get('type'),
+                    "external_id": external_id,  # external_id только в данных
+                    "geometry_type": obj.get('geometry_type'),
+                    "primary_types": obj.get('primary_types', []),
+                    "specific_types": obj.get('specific_types', [])
+                })
+            
+            map_result["count"] = len(objects)
+            map_result["answer"] = answer
+            map_result["objects"] = detailed_objects
+            
+            # Добавляем информацию о разрешении синонимов в ответ
+            if resolved_object_info and resolved_object_info.get("resolved", False):
+                map_result["synonym_resolution"] = {
+                    "original_name": resolved_object_info["original_name"],
+                    "resolved_name": object_name,
+                    "original_type": resolved_object_info.get("original_type", object_type)
+                }
+            
+            # Добавляем статистику по external_id (только для отладки)
+            objects_with_external_id = [obj for obj in detailed_objects if obj.get('external_id')]
+            if debug_mode and objects_with_external_id:
+                debug_info["external_id_stats"] = {
+                    "total_objects": len(detailed_objects),
+                    "with_external_id": len(objects_with_external_id)
+                }
+            
+            # Добавляем debug информацию
+            if debug_mode:
+                debug_info["visualization"] = {
+                    "map_name": map_name,
+                    "total_objects_on_map": len(objects_for_map),
+                    "search_type": "direct_object_search"
+                }
+                map_result["debug"] = debug_info
+            
+            return jsonify(map_result)
+            
+        except Exception as e:
+            logger.error(f"Ошибка прямого поиска объекта: {str(e)}")
+            debug_info["error"] = str(e)
+            response = {"error": "Внутренняя ошибка сервера при поиске объекта"}
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response), 500
+    
+    # СТАРАЯ ЛОГИКА: Поиск по области (если area_name указан)
+    if not area_name:
+        response = {"error": "area_name is required when no object_name provided"}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 400
+    
+    # Используем relational_service для поиска полигона области
+    area_geometry = None
+    area_info = None
+    
+    try:
+        # Ищем полигон области через relational_service
+        area_results = relational_service.find_area_geometry(area_name)
+        
+        if area_results:
+            area_geometry = area_results.get("geometry")
+            area_info = area_results.get("area_info", {})
+            
+            debug_info["steps"].append({
+                "step": "area_search",
+                "found": True,
+                "area_title": area_info.get('title', area_name),
+                "source": area_info.get('source', 'unknown')
+            })
+        else:
+            debug_info["steps"].append({
+                "step": "area_search", 
+                "found": False,
+                "error": "Area not found in map_content"
+            })
+            
+    except Exception as e:
+        logger.error(f"Ошибка поиска области через relational_service: {str(e)}")
+        debug_info["steps"].append({
+            "step": "area_search",
+            "error": str(e)
+        })
+    
+    if not area_geometry:
+        response = {"error": f"Полигон для области '{area_name}' не найден в базе данных"}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 404
+
+    try:
+        # Используем search_service для поиска объектов с новыми параметрами (используем разрешенные имя и тип)
+        results = search_service.get_objects_in_area_by_type(
+            area_geometry=area_geometry,
+            object_type=object_type,  # Используем разрешенный тип
+            object_subtype=object_subtype,
+            object_name=object_name,  # Используем разрешенное имя
+            limit=int(limit),
+            search_around=search_around,
+            buffer_radius_km=float(buffer_radius_km)
+        )
+        
+        objects = results.get("objects", [])
+        answer = results.get("answer", "")
+        search_stats = results.get("search_stats", {})
+        
+        # Debug информация о результатах
+        debug_info["search_results"] = {
+            "total_objects_found": len(objects),
+            "search_criteria": {
+                "object_type": object_type,
+                "object_subtype": object_subtype,
+                "object_name": object_name,
+                "search_around": search_around,
+                "buffer_radius_km": buffer_radius_km
+            },
+            "location_stats": search_stats
+        }
+        
+        if not objects:
+            response = {
+                "status": "no_objects", 
+                "message": answer
+            }
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response)
+        
+        # Подготавливаем объекты для карты
+        objects_for_map = []
+        
+        # Добавляем полигон области как первый объект
+        area_title = area_info.get('title', area_name) if area_info else area_name
+        objects_for_map.append({
+            'tooltip': f"Область поиска: {area_title}",
+            'popup': f"<h6>{area_title}</h6><p>Область поиска</p>",
+            'geojson': area_geometry
+        })
+        
+        # Если включен поиск вокруг, добавляем буферную зону
+        buffer_geometry = None
+        if search_around:
+            # Создаем буферную зону для визуализации через geo_service
+            buffer_geometry = geo_service.create_buffer_geometry(area_geometry, buffer_radius_km)
+            if buffer_geometry:
+                objects_for_map.append({
+                    'tooltip': f"Зона поиска (+{buffer_radius_km} км)",
+                    'popup': f"<h6>Зона поиска</h6><p>Буферная зона {buffer_radius_km} км вокруг области</p>",
+                    'geojson': buffer_geometry,
+                    'style': {'color': 'orange', 'fillOpacity': 0.1, 'weight': 2}  # Стиль для буферной зоны
+                })
+                debug_info["steps"].append({
+                    "step": "buffer_zone_creation",
+                    "success": True,
+                    "buffer_radius_km": buffer_radius_km
+                })
+            else:
+                debug_info["steps"].append({
+                    "step": "buffer_zone_creation", 
+                    "success": False,
+                    "error": "Failed to create buffer geometry"
+                })
+        
+        for obj in objects:
+            name = obj.get('name', 'Без имени')
+            description = obj.get('description', '')
+            geojson = obj.get('geojson', {})
+            
+            popup_html = f"<h6>{name}</h6>"
+            if description:
+                short_desc = description[:200] + "..." if len(description) > 200 else description
+                popup_html += f"<p>{short_desc}</p>"
+            
+            objects_for_map.append({
+                'tooltip': name,
+                'popup': popup_html,
+                'geojson': geojson
+            })
+        
+        # Создаем карту
+        map_name = f"area_search_{area_name.replace(' ', '_')}_{int(time.time())}"
+        map_result = geo.draw_custom_geometries(objects_for_map, map_name)
+        
+        # Подготавливаем детальную информацию об объектах
+        detailed_objects = []
+        for obj in objects:
+            features = obj.get('features', {})
+            external_id = extract_external_id(features)
+            
+            detailed_objects.append({
+                "name": obj.get('name'), 
+                "description": obj.get('description'),
+                "type": obj.get('type'),
+                "external_id": external_id,
+                "geometry_type": obj.get('geometry_type'),
+                "primary_types": obj.get('primary_types', []),
+                "specific_types": obj.get('specific_types', []),
+                "location_type": obj.get('location_type', 'inside')  # Добавляем тип расположения
+            })
+        
+        map_result["count"] = len(objects)
+        map_result["answer"] = answer
+        map_result["objects"] = detailed_objects
+        map_result["search_stats"] = search_stats  # Добавляем статистику поиска
+        
+        # Добавляем информацию о буферной зоне в ответ
+        if buffer_geometry:
+            map_result["buffer_zone"] = {
+                "radius_km": buffer_radius_km,
+                "geometry": buffer_geometry
+            }
+        
+        # Добавляем информацию о разрешении синонимов в ответ
+        if resolved_object_info and resolved_object_info.get("resolved", False):
+            map_result["synonym_resolution"] = {
+                "original_name": resolved_object_info["original_name"],
+                "resolved_name": object_name,
+                "original_type": resolved_object_info.get("original_type", object_type)
+            }
+        
+        # Добавляем статистику по external_id (только для отладки)
+        objects_with_external_id = [obj for obj in detailed_objects if obj.get('external_id')]
+        if debug_mode and objects_with_external_id:
+            debug_info["external_id_stats"] = {
+                "total_objects": len(detailed_objects),
+                "with_external_id": len(objects_with_external_id)
+            }
+        
+        # Добавляем debug информацию
+        if debug_mode:
+            debug_info["visualization"] = {
+                "map_name": map_name,
+                "total_objects_on_map": len(objects_for_map),
+                "area_included": True,
+                "buffer_zone_included": search_around and buffer_geometry is not None,
+                "objects_inside": search_stats.get('inside_area', 0),
+                "objects_around": search_stats.get('around_area', 0)
+            }
+            map_result["debug"] = debug_info
+        
+        return jsonify(map_result)
+        
+    except Exception as e:
+        logger.error(f"Ошибка поиска объектов по типу в области: {str(e)}")
+        debug_info["error"] = str(e)
+        response = {"error": "Внутренняя ошибка сервера при поиске"}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 500
+       
 def validate_geojson_polygon(geojson: dict) -> bool:
     """Проверяет, что GeoJSON содержит валидный полигон"""
     try:
@@ -532,9 +994,13 @@ def search_images_by_features():
     Можно искать как по виду, так и только по признакам
     """
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
-    debug_info = {}
-    logger.debug(debug_mode)
-    logger.debug("\n")
+    in_stoplist = request.args.get("in_stoplist", "1")  # Новый параметр
+    
+    debug_info = {
+        "timestamp": time.time(),
+        "steps": []
+    }
+    
     try:
         data = request.get_json()
         species_name = data.get("species_name")
@@ -545,10 +1011,17 @@ def search_images_by_features():
         if not species_name and not features:
             return jsonify({"error": "Необходимо указать species_name или features"}), 400
         
+        logger.info(f"🔍 /search_images_by_features - получен запрос с параметрами:")
+        logger.info(f"   - species_name: {data.get('species_name')}")
+        logger.info(f"   - features: {data.get('features', {})}")
+        logger.info(f"   - query_params: debug_mode={debug_mode}, in_stoplist={in_stoplist}")
+        logger.info(f"   - raw_data: {data}")
+        
         # Debug информация о запросе
-        debug_info["request"] = {
+        debug_info["parameters"] = {
             "species_name": species_name,
             "features": features,
+            "in_stoplist": in_stoplist,
             "timestamp": time.time()
         }
         
@@ -558,6 +1031,40 @@ def search_images_by_features():
                 features=features
             )
             
+            # ФИЛЬТРАЦИЯ ПО STOPLIST для изображений
+            if result.get("status") == "success" and "images" in result:
+                safe_images = []
+                stoplisted_images = []
+                
+                for image in result["images"]:
+                    feature_data = image.get("features", {})
+                    image_in_stoplist = feature_data.get("in_stoplist")
+                    
+                    # Проверяем уровень безопасности
+                    try:
+                        requested_level = int(in_stoplist)
+                        if image_in_stoplist is None or int(image_in_stoplist) <= requested_level:
+                            safe_images.append(image)
+                        else:
+                            stoplisted_images.append(image)
+                            logger.info(f"Исключено изображение с in_stoplist={image_in_stoplist}: {image.get('title', 'Без названия')}")
+                    except (ValueError, TypeError):
+                        # Если ошибка преобразования, используем уровень по умолчанию (1)
+                        if image_in_stoplist is None or int(image_in_stoplist) <= 1:
+                            safe_images.append(image)
+                        else:
+                            stoplisted_images.append(image)
+                            logger.info(f"Исключено изображение с in_stoplist={image_in_stoplist}: {image.get('title', 'Без названия')}")
+                
+                # Обновляем результат с безопасными изображениями
+                result["images"] = safe_images
+                result["count"] = len(safe_images)
+                
+                # Добавляем информацию о фильтрации
+                result["in_stoplist_filter_applied"] = True
+                result["in_stoplist_level"] = in_stoplist
+                result["stoplisted_count"] = len(stoplisted_images)
+            
             # Добавляем debug информацию
             if debug_mode:
                 debug_info["search_type"] = "with_species"
@@ -565,6 +1072,11 @@ def search_images_by_features():
                 debug_info["database_query"] = {
                     "species_conditions": result.get("species_conditions", []),
                     "feature_conditions": list(features.keys())
+                }
+                debug_info["stoplist_filter"] = {
+                    "total_before_filter": len(result.get("images", [])),
+                    "safe_after_filter": len(safe_images) if species_name else "N/A",
+                    "stoplisted_count": len(stoplisted_images) if species_name else "N/A"
                 }
                 result["debug"] = debug_info
                 
@@ -577,11 +1089,45 @@ def search_images_by_features():
                 features=features
             )
             
+            # ФИЛЬТРАЦИЯ ПО STOPLIST для изображений (только по признакам)
+            if result.get("status") == "success" and "images" in result:
+                safe_images = []
+                stoplisted_images = []
+                
+                for image in result["images"]:
+                    feature_data = image.get("features", {})
+                    image_in_stoplist = feature_data.get("in_stoplist")
+                    
+                    try:
+                        requested_level = int(in_stoplist)
+                        if image_in_stoplist is None or int(image_in_stoplist) <= requested_level:
+                            safe_images.append(image)
+                        else:
+                            stoplisted_images.append(image)
+                            logger.info(f"Исключено изображение с in_stoplist={image_in_stoplist}: {image.get('title', 'Без названия')}")
+                    except (ValueError, TypeError):
+                        if image_in_stoplist is None or int(image_in_stoplist) <= 1:
+                            safe_images.append(image)
+                        else:
+                            stoplisted_images.append(image)
+                            logger.info(f"Исключено изображение с in_stoplist={image_in_stoplist}: {image.get('title', 'Без названия')}")
+                
+                result["images"] = safe_images
+                result["count"] = len(safe_images)
+                result["in_stoplist_filter_applied"] = True
+                result["in_stoplist_level"] = in_stoplist
+                result["stoplisted_count"] = len(stoplisted_images)
+            
             # Добавляем debug информацию
             if debug_mode:
                 debug_info["search_type"] = "features_only"
                 debug_info["database_query"] = {
                     "feature_conditions": list(features.keys())
+                }
+                debug_info["stoplist_filter"] = {
+                    "total_before_filter": len(result.get("images", [])),
+                    "safe_after_filter": len(safe_images),
+                    "stoplisted_count": len(stoplisted_images)
                 }
                 result["debug"] = debug_info
                 
@@ -611,292 +1157,30 @@ def save_location():
     place_name = geo.reverse_geocode(float(latitude), float(longitude))
     user_locations[user_id] = {"latitude": latitude, "longitude": longitude, "place_name": place_name}
     return jsonify({"status": "ok"}), 200
-
-@app.route("/objects_in_area_by_type", methods=["POST"])
-def objects_in_area_by_type():
-    debug_mode = request.args.get("debug_mode", "false").lower() == "true"
-    debug_info = {
-        "timestamp": time.time(),
-        "steps": []
-    }
-    
-    data = request.get_json()
-    area_name = data.get("area_name")
-    object_type = data.get("object_type")
-    object_subtype = data.get("object_subtype")
-    object_name = data.get("object_name")
-    limit = data.get("limit", 20)
-    
-    # Debug информация о параметрах
-    debug_info["parameters"] = {
-        "area_name": area_name,
-        "object_type": object_type,
-        "object_subtype": object_subtype,
-        "object_name": object_name,
-        "limit": limit
-    }
-    
-    # НОВАЯ ЛОГИКА: Если area_name не указан, но есть object_name - ищем объект напрямую
-    if not area_name and object_name:
-        debug_info["steps"].append({
-            "step": "direct_object_search",
-            "reason": "area_name not provided, searching object directly"
-        })
-        
-        try:
-            # Ищем объект по имени без привязки к области
-            results = search_service.search_objects_directly_by_name(
-                object_name=object_name,
-                object_type=object_type,
-                object_subtype=object_subtype,
-                limit=limit
-            )
-            
-            objects = results.get("objects", [])
-            answer = results.get("answer", "")
-            
-            # Debug информация о результатах
-            debug_info["search_results"] = {
-                "total_objects_found": len(objects),
-                "search_type": "direct_object_search"
-            }
-            
-            if not objects:
-                response = {
-                    "status": "no_objects", 
-                    "message": answer
-                }
-                if debug_mode:
-                    response["debug"] = debug_info
-                return jsonify(response)
-            
-            # Подготавливаем объекты для карты
-            objects_for_map = []
-            
-            for obj in objects:
-                name = obj.get('name', 'Без имени')
-                description = obj.get('description', '')
-                geojson = obj.get('geojson', {})
-                obj_type = obj.get('type', 'unknown')
-                
-                popup_html = f"<h6>{name}</h6>"
-                if obj_type:
-                    popup_html += f"<p><strong>Тип:</strong> {obj_type}</p>"
-                if description:
-                    short_desc = description[:200] + "..." if len(description) > 200 else description
-                    popup_html += f"<p>{short_desc}</p>"
-                
-                objects_for_map.append({
-                    'tooltip': name,
-                    'popup': popup_html,
-                    'geojson': geojson
-                })
-            
-            # Создаем карту
-            map_name = f"direct_search_{object_name.replace(' ', '_')}_{int(time.time())}"
-            map_result = geo.draw_custom_geometries(objects_for_map, map_name)
-            
-            map_result["count"] = len(objects)
-            map_result["answer"] = answer
-            map_result["objects"] = [{
-                "name": obj.get('name'), 
-                "description": obj.get('description'),
-                "type": obj.get('type')
-            } for obj in objects]
-            
-            # Добавляем debug информацию
-            if debug_mode:
-                debug_info["visualization"] = {
-                    "map_name": map_name,
-                    "total_objects_on_map": len(objects_for_map),
-                    "search_type": "direct_object_search"
-                }
-                map_result["debug"] = debug_info
-            
-            return jsonify(map_result)
-            
-        except Exception as e:
-            logger.error(f"Ошибка прямого поиска объекта: {str(e)}")
-            debug_info["error"] = str(e)
-            response = {"error": "Внутренняя ошибка сервера при поиске объекта"}
-            if debug_mode:
-                response["debug"] = debug_info
-            return jsonify(response), 500
-    
-    # СТАРАЯ ЛОГИКА: Поиск по области (если area_name указан)
-    if not area_name:
-        response = {"error": "area_name is required when no object_name provided"}
-        if debug_mode:
-            response["debug"] = debug_info
-        return jsonify(response), 400
-    
-    # Debug информация о параметрах
-    debug_info["parameters"] = {
-        "area_name": area_name,
-        "object_type": object_type,
-        "object_subtype": object_subtype,
-        "object_name": object_name,
-        "limit": limit
-    }
-    
-    # Используем relational_service для поиска полигона области
-    area_geometry = None
-    area_info = None
-    
-    try:
-        # Ищем полигон области через relational_service
-        area_results = relational_service.find_area_geometry(area_name)
-        
-        if area_results:
-            area_geometry = area_results.get("geometry")
-            area_info = area_results.get("area_info", {})
-            
-            debug_info["steps"].append({
-                "step": "area_search",
-                "found": True,
-                "area_title": area_info.get('title', area_name),
-                "source": area_info.get('source', 'unknown')
-            })
-        else:
-            debug_info["steps"].append({
-                "step": "area_search", 
-                "found": False,
-                "error": "Area not found in map_content"
-            })
-            
-    except Exception as e:
-        logger.error(f"Ошибка поиска области через relational_service: {str(e)}")
-        debug_info["steps"].append({
-            "step": "area_search",
-            "error": str(e)
-        })
-    
-    if not area_geometry:
-        response = {"error": f"Полигон для области '{area_name}' не найден в базе данных"}
-        if debug_mode:
-            response["debug"] = debug_info
-        return jsonify(response), 404
-
-    try:
-        # Используем search_service для поиска объектов
-        results = search_service.get_objects_in_area_by_type(
-            area_geometry=area_geometry,
-            object_type=object_type,
-            object_subtype=object_subtype,
-            object_name=object_name,
-            limit=int(limit)
-        )
-        
-        objects = results.get("objects", [])
-        answer = results.get("answer", "")
-        
-        # Debug информация о результатах
-        debug_info["search_results"] = {
-            "total_objects_found": len(objects),
-            "search_criteria": {
-                "object_type": object_type,
-                "object_subtype": object_subtype,
-                "object_name": object_name
-            }
-        }
-        
-        if not objects:
-            response = {
-                "status": "no_objects", 
-                "message": answer
-            }
-            if debug_mode:
-                response["debug"] = debug_info
-            return jsonify(response)
-        
-        # Подготавливаем объекты для карты
-        objects_for_map = []
-        
-        # Добавляем полигон области как первый объект
-        area_title = area_info.get('title', area_name) if area_info else area_name
-        objects_for_map.append({
-            'tooltip': f"Область поиска: {area_title}",
-            'popup': f"<h6>{area_title}</h6><p>Область поиска</p>",
-            'geojson': area_geometry
-        })
-        
-        # Добавляем найденные объекты
-        for obj in objects:
-            name = obj.get('name', 'Без имени')
-            description = obj.get('description', '')
-            geojson = obj.get('geojson', {})
-            obj_type = obj.get('type', 'unknown')
-            
-            popup_html = f"<h6>{name}</h6>"
-            if obj_type:
-                popup_html += f"<p><strong>Тип:</strong> {obj_type}</p>"
-            if description:
-                short_desc = description[:200] + "..." if len(description) > 200 else description
-                popup_html += f"<p>{short_desc}</p>"
-            
-            objects_for_map.append({
-                'tooltip': name,
-                'popup': popup_html,
-                'geojson': geojson
-            })
-        
-        # Создаем карту
-        map_name = f"area_search_{area_name.replace(' ', '_')}_{int(time.time())}"
-        map_result = geo.draw_custom_geometries(objects_for_map, map_name)
-        
-        map_result["count"] = len(objects)
-        map_result["answer"] = answer
-        map_result["objects"] = [{
-            "name": obj.get('name'), 
-            "description": obj.get('description'),
-            "type": obj.get('type')
-        } for obj in objects]
-        
-        # Добавляем debug информацию
-        if debug_mode:
-            debug_info["visualization"] = {
-                "map_name": map_name,
-                "total_objects_on_map": len(objects_for_map),
-                "area_included": True
-            }
-            map_result["debug"] = debug_info
-        
-        return jsonify(map_result)
-        
-    except Exception as e:
-        logger.error(f"Ошибка поиска объектов по типу в области: {str(e)}")
-        debug_info["error"] = str(e)
-        response = {"error": "Внутренняя ошибка сервера при поиске"}
-        if debug_mode:
-            response["debug"] = debug_info
-        return jsonify(response), 500
     
 @app.route("/object/description/", methods=["GET", "POST"])
 def get_object_description():
     # Обработка GET параметров
+    logger.info(f"📦 /object/description - GET params: {dict(request.args)}")
+    logger.info(f"📦 /object/description - POST data: {request.get_json()}")
+    
     object_name = request.args.get("object_name")
     query = request.args.get("query")
-    limit = int(request.args.get("limit", 0))  # 0 = без лимита
+    limit = int(request.args.get("limit", 0))
     similarity_threshold = float(request.args.get("similarity_threshold", 0.01))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     use_gigachat_answer = request.args.get("use_gigachat_answer", "false").lower() == "true"
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
     object_type = request.args.get("object_type", "all")
+    save_prompt = request.args.get("save_prompt", "false").lower() == "true"
+    in_stoplist = request.args.get("in_stoplist", "1")
 
     # Обработка POST body
     filter_data = None
     if request.method == "POST" and request.is_json:
         filter_data = request.get_json()
         logger.debug(f"Получены фильтры из body: {filter_data}")
-
-    # ВАЖНО: Если use_gigachat_answer=True, то query обязателен
-    if use_gigachat_answer and not query:
-        return jsonify({"error": "Параметр 'query' обязателен при use_gigachat_answer=true"}), 400
-
-    # Если нет ни object_name, ни query, ни filter_data - возвращаем ошибку
-    if not object_name and not query and not filter_data:
-        return jsonify({"error": "Необходимо указать object_name, query или передать фильтры в body"}), 400
 
     # Debug информация
     debug_info = {
@@ -909,22 +1193,159 @@ def get_object_description():
             "include_similarity": include_similarity,
             "use_gigachat_filter": use_gigachat_filter,
             "use_gigachat_answer": use_gigachat_answer,
-            "filter_data": filter_data
+            "filter_data": filter_data,
+            "save_prompt": save_prompt,
+            "in_stoplist": in_stoplist
         },
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "steps": []
     }
+
+    # РАЗРЕШЕНИЕ СИНОНИМОВ ОБЪЕКТОВ
+    resolved_object_info = None
+    if object_name:
+        resolved_object_info = search_service.resolve_object_synonym(object_name, object_type)
+        
+        debug_info["synonym_resolution"] = {
+            "original_name": object_name,
+            "original_type": object_type,
+            "resolved_info": resolved_object_info
+        }
+        
+        if resolved_object_info.get("resolved", False):
+            object_name = resolved_object_info["main_form"]
+            # Не меняем object_type, если он не был передан изначально
+            if object_type != "all":
+                object_type = resolved_object_info["object_type"]
+            logger.info(f"✅ Разрешен синоним объекта: '{resolved_object_info['original_name']}' -> '{object_name}' (тип: {object_type})")
+        else:
+            logger.info(f"ℹ️ Синоним для объекта '{object_name}' не найден, используем оригинальное название")
+
+    # ВАЖНО: Если use_gigachat_answer=True, то query обязателен
+    if use_gigachat_answer and not query:
+        response = {"error": "Параметр 'query' обязателен при use_gigachat_answer=true"}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 400
+
+    # Если нет ни object_name, ни query, ни filter_data - возвращаем ошибку
+    if not object_name and not query and not filter_data:
+        response = {"error": "Необходимо указать object_name, query или передать фильтры в body"}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 400
+
+    # Вспомогательная функция для извлечения external_id
+    def extract_external_id(desc_data):
+        """Извлекает external_id из данных описания"""
+        if not desc_data or not isinstance(desc_data, dict):
+            return None
+        
+        # Проверяем разные возможные места расположения external_id
+        search_paths = [
+            # Основной путь - в structured_data (если есть)
+            ['structured_data', 'metadata', 'meta_info', 'id'],
+            ['structured_data', 'metadata', 'meta_info', 'external_id'],
+            # В feature_data (основной путь для текущих данных)
+            ['feature_data', 'metadata', 'meta_info', 'id'],
+            ['feature_data', 'metadata', 'meta_info', 'external_id'],
+            ['feature_data', 'meta_info', 'external_id'],
+            ['feature_data', 'meta_info', 'id'],
+            # Прямо в корне feature_data
+            ['feature_data', 'external_id'],
+            ['feature_data', 'id'],
+            # В других возможных местах в feature_data
+            ['feature_data', 'external_info', 'external_id'],
+            ['feature_data', 'source_info', 'external_id'],
+            # Прямо в корне desc_data (если external_id на верхнем уровне)
+            ['external_id'],
+            ['id'],
+            # В других возможных местах
+            ['metadata', 'meta_info', 'id'],
+            ['metadata', 'meta_info', 'external_id'],
+            ['meta_info', 'external_id'],
+            ['meta_info', 'id'],
+            # НОВЫЕ ПУТИ: для работы с данными из relational_service
+            ['structured_data', 'meta_info', 'id'],  # Прямо в structured_data
+            ['structured_data', 'meta_info', 'external_id'],
+            ['meta_info', 'id'],  # На верхнем уровне structured_data
+            ['meta_info', 'external_id'],
+        ]
+        
+        for path in search_paths:
+            current = desc_data
+            found = True
+            
+            for key in path:
+                if isinstance(current, dict) and key in current:
+                    current = current[key]
+                else:
+                    found = False
+                    break
+            
+            if found and current is not None:
+                logger.debug(f"Найден external_id по пути {path}: {current}")
+                return str(current)
+        
+        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Рекурсивный поиск в structured_data
+        if 'structured_data' in desc_data and isinstance(desc_data['structured_data'], dict):
+            # Ищем meta_info/id рекурсивно в structured_data
+            def find_meta_info_recursive(data):
+                if isinstance(data, dict):
+                    # Проверяем текущий уровень
+                    if 'meta_info' in data and isinstance(data['meta_info'], dict):
+                        meta_info = data['meta_info']
+                        if 'id' in meta_info:
+                            return str(meta_info['id'])
+                        elif 'external_id' in meta_info:
+                            return str(meta_info['external_id'])
+                    
+                    # Рекурсивно ищем во всех вложенных словарях
+                    for key, value in data.items():
+                        if isinstance(value, (dict, list)):
+                            result = find_meta_info_recursive(value)
+                            if result:
+                                return result
+                elif isinstance(data, list):
+                    for item in data:
+                        result = find_meta_info_recursive(item)
+                        if result:
+                            return result
+                return None
+            
+            recursive_result = find_meta_info_recursive(desc_data['structured_data'])
+            if recursive_result:
+                logger.debug(f"Найден external_id рекурсивно в structured_data: {recursive_result}")
+                return recursive_result
+        
+        # Логируем доступные ключи для отладки
+        available_keys = list(desc_data.keys()) if isinstance(desc_data, dict) else 'not a dict'
+        logger.debug(f"External_id не найден. Доступные ключи: {available_keys}")
+        
+        # Дополнительная отладка: проверим структуру feature_data если он есть
+        if 'feature_data' in desc_data and isinstance(desc_data['feature_data'], dict):
+            feature_keys = list(desc_data['feature_data'].keys())
+            logger.debug(f"Ключи в feature_data: {feature_keys}")
+            
+            # Проверим есть ли metadata в feature_data
+            if 'metadata' in desc_data['feature_data']:
+                metadata_keys = list(desc_data['feature_data']['metadata'].keys()) if isinstance(desc_data['feature_data']['metadata'], dict) else 'not a dict'
+                logger.debug(f"Ключи в metadata: {metadata_keys}")
+        
+        return None
 
     try:
         # Определяем лимиты для разных случаев
-        search_limit = limit if limit > 0 else 100  # Большой лимит для поиска
-        context_limit = 5  # Топ описаний для контекста GigaChat
+        search_limit = limit if limit > 0 else 100
+        context_limit = 5
         
         if filter_data:
-            # Используем новый метод для поиска по фильтрам
             descriptions = search_service.get_object_descriptions_by_filters(
                 filter_data=filter_data,
                 object_type=object_type,
-                limit=search_limit
+                limit=search_limit,
+                in_stoplist=in_stoplist,
+                object_name=object_name  # Передаем разрешенное название для точного поиска
             )
             search_method = "filter_search"
             
@@ -939,29 +1360,32 @@ def get_object_description():
                 logger.error("Embedding содержит нечисловые элементы")
                 return jsonify({"error": "Internal embedding error"}), 500
                 
-            # Если есть object_name - ищем по конкретному объекту
             if object_name:
                 descriptions = search_service.get_object_descriptions_with_embedding(
                     object_name=object_name,
                     object_type=object_type,
                     query_embedding=embedding,
                     limit=search_limit,
-                    similarity_threshold=similarity_threshold
+                    similarity_threshold=similarity_threshold,
+                    in_stoplist=in_stoplist
                 )
                 search_method = "object_with_embedding"
             else:
-                # Если нет object_name - ищем по семантическому сходству с query
                 descriptions = search_service.search_objects_by_embedding(
                     query_embedding=embedding,
                     object_type=object_type,
                     limit=search_limit,
-                    similarity_threshold=similarity_threshold
+                    similarity_threshold=similarity_threshold,
+                    in_stoplist=in_stoplist
                 )
                 search_method = "semantic_search"
                 
         else:
-            # Если нет query, используем обычный поиск по object_name
-            descriptions_text = search_service.get_object_descriptions(object_name, object_type)
+            descriptions_text = search_service.get_object_descriptions(
+                object_name, 
+                object_type,
+                in_stoplist=in_stoplist
+            )
             
             if include_similarity:
                 descriptions = [{"content": text, "similarity": None, "source": "content"} 
@@ -980,11 +1404,68 @@ def get_object_description():
                 "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions and search_method != "simple_search" else []
             }
 
+        # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
+        safe_descriptions = []
+        stoplisted_descriptions = []
+
+        for desc in descriptions:
+            if isinstance(desc, dict):
+                feature_data = desc.get("feature_data", {})
+                desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
+                
+                try:
+                    requested_level = int(in_stoplist)
+                    if desc_in_stoplist is None or int(desc_in_stoplist) <= requested_level:
+                        safe_descriptions.append(desc)
+                    else:
+                        stoplisted_descriptions.append(desc)
+                except (ValueError, TypeError):
+                    if desc_in_stoplist is None or int(desc_in_stoplist) <= 1:
+                        safe_descriptions.append(desc)
+                    else:
+                        stoplisted_descriptions.append(desc)
+            else:
+                safe_descriptions.append(desc)
+                
+        if debug_mode and descriptions:
+            debug_info["sample_description_structure"] = []
+            for i, desc in enumerate(descriptions[:2]):
+                if isinstance(desc, dict):
+                    sample_structure = {
+                        "index": i,
+                        "keys": list(desc.keys()),
+                        "has_feature_data": 'feature_data' in desc,
+                        "has_structured_data": 'structured_data' in desc
+                    }
+                    if 'feature_data' in desc and isinstance(desc['feature_data'], dict):
+                        sample_structure["feature_data_keys"] = list(desc['feature_data'].keys())
+                        if 'metadata' in desc['feature_data'] and isinstance(desc['feature_data']['metadata'], dict):
+                            sample_structure["metadata_keys"] = list(desc['feature_data']['metadata'].keys())
+                    debug_info["sample_description_structure"].append(sample_structure)
+        
+        # Debug информация о фильтрации in_stoplist
+        if debug_mode:
+            debug_info["in_stoplist_filter"] = {
+                "total_before_filter": len(descriptions),
+                "safe_after_filter": len(safe_descriptions),
+                "stoplisted_count": len(stoplisted_descriptions),
+                "requested_level": in_stoplist
+            }
+
+        # Если после фильтрации не осталось безопасных документов
+        if not safe_descriptions:
+            response = {"error": "Я не готов про это разговаривать"}
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response), 400
+
+        # Используем только безопасные описания для дальнейшей обработки
+        descriptions = safe_descriptions
+
         # Обработка use_gigachat_filter
         if use_gigachat_filter:
             filter_query = query if query else object_name
             
-            # Debug информация до фильтрации
             if debug_mode:
                 debug_info["before_gigachat_filter"] = {
                     "count": len(descriptions),
@@ -996,7 +1477,6 @@ def get_object_description():
                 descriptions
             )
             
-            # Debug информация после фильтрации
             if debug_mode:
                 debug_info["after_gigachat_filter"] = {
                     "count": len(filtered_descriptions),
@@ -1005,7 +1485,7 @@ def get_object_description():
 
             descriptions = filtered_descriptions
 
-        # НОВАЯ ЛОГИКА: Генерация ответа GigaChat с обработкой blacklist
+        # Обработка use_gigachat_answer
         if use_gigachat_answer:
             if not descriptions:
                 response = {"error": "Не найдено описаний для генерации ответа"}
@@ -1013,39 +1493,91 @@ def get_object_description():
                     response["debug"] = debug_info
                 return jsonify(response), 404
 
-            # Берем топ описаний для контекста (сортировка по similarity если есть)
-            if all('similarity' in desc for desc in descriptions):
-                context_descriptions = sorted(descriptions, key=lambda x: x.get('similarity', 0), reverse=True)[:context_limit]
-            else:
-                context_descriptions = descriptions[:context_limit]
-            logger.info("=== ДОКУМЕНТЫ ДЛЯ GIGACHAT КОНТЕКСТА ===")
-            for i, desc in enumerate(context_descriptions):
-                content = desc["content"] if isinstance(desc, dict) else desc
-                # Извлекаем первую строку как название
-                first_line = content.strip().split('\n')[0] if content else "Без названия"
-                title = first_line[:100]  # Ограничиваем длину для лога
-                logger.info(f"Документ {i+1}: {title}")
+            # ФИЛЬТРАЦИЯ BLACKLIST_RISK
+            safe_descriptions_for_gigachat = []
+            blacklisted_descriptions = []
+            
+            for desc in descriptions:
+                if isinstance(desc, dict):
+                    feature_data = desc.get("feature_data", {})
+                    if feature_data and feature_data.get("blacklist_risk") is True:
+                        blacklisted_descriptions.append(desc)
+                        continue
+                    
+                    if desc.get("blacklist_risk") is True:
+                        blacklisted_descriptions.append(desc)
+                        continue
                 
-                # Дополнительно логируем длину контента и первые 200 символов
-                content_length = len(content) if content else 0
-                preview = content[:200] + "..." if content and len(content) > 200 else content
-                logger.info(f"  Длина: {content_length} символов")
-                logger.info(f"  Превью: {preview}")
-            logger.info("=== КОНЕЦ СПИСКА ДОКУМЕНТОВ ===")
-            # Объединяем топ описаний в контекст
+                safe_descriptions_for_gigachat.append(desc)
+            
+            # Debug информация о фильтрации blacklist
+            if debug_mode:
+                debug_info["blacklist_filter"] = {
+                    "total_before_filter": len(descriptions),
+                    "safe_after_filter": len(safe_descriptions_for_gigachat),
+                    "blacklisted_count": len(blacklisted_descriptions)
+                }
+            
+            # Если после фильтрации не осталось безопасных документов
+            if not safe_descriptions_for_gigachat:
+                response = {"error": "Все описания содержат риск blacklist и не могут быть использованы для генерации ответа GigaChat"}
+                if debug_mode:
+                    response["debug"] = debug_info
+                return jsonify(response), 400
+
+            descriptions_for_context = safe_descriptions_for_gigachat
+
+            # Берем топ безопасных описаний для контекста
+            if all('similarity' in desc for desc in descriptions_for_context):
+                context_descriptions = sorted(descriptions_for_context, key=lambda x: x.get('similarity', 0), reverse=True)[:context_limit]
+            else:
+                context_descriptions = descriptions_for_context[:context_limit]
+            
+            # Объединяем топ безопасных описаний в контекст
             context = "\n\n".join([
                 desc["content"] if isinstance(desc, dict) else desc 
                 for desc in context_descriptions
             ])
-            
+
             # Добавляем информацию о количестве найденных записей
-            total_count = len(descriptions)
-            count_info = f"\n\nВсего найдено записей: {total_count}"
+            total_count = len(descriptions_for_context)
+            count_info = f"\n\nВсего найдено безопасных записей: {total_count}"
+            if len(blacklisted_descriptions) > 0:
+                count_info += f" (исключено {len(blacklisted_descriptions)} записей с риском blacklist)"
             if total_count > context_limit:
                 count_info += f" (в контекст включено топ-{context_limit} по релевантности)"
             
             context += count_info
-            logger.info(f"  Весь контекст: {context}")
+            
+            # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА
+            full_prompt = f"""Ты эксперт по Байкальской природной территории. 
+Используй твою базу знаний для точных ответов на вопросы пользователя.
+
+Особые указания:
+- На вопросы 'сколько' - подсчитай количество соответствующих записей в базе знаний
+Например, на вопрос 'Сколько музеев?' при информации 'Всего найдено записей: 98 (в контекст включено топ-5 по релевантности)', нужно ответить около 98 музеев и затем описание каждого музея из топ записей
+- Будь информативным и лаконичным
+- Даже при неполной информации предоставь доступные детали
+
+Твоя база знаний:
+{context}
+
+Вопрос: {query}
+
+Ответ:"""
+            
+            if save_prompt:
+                current_dir = Path(__file__).parent
+                timestamp = int(time.time())
+                prompt_filename = current_dir / f"gigachat_prompt_{timestamp}.txt"
+                
+                try:
+                    with open(prompt_filename, 'w', encoding='utf-8') as f:
+                        f.write(full_prompt)
+                    logger.info(f"✅ Полный промпт сохранен в: {prompt_filename}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка сохранения промпта: {e}")
+            
             # Генерируем ответ с помощью GigaChat
             try:
                 gigachat_result = search_service._generate_gigachat_answer(query, context)
@@ -1053,23 +1585,32 @@ def get_object_description():
                 # Проверяем, был ли ответ заблокирован
                 is_blacklist = gigachat_result.get("finish_reason") == "blacklist" or not gigachat_result.get("success", True)
                 
-                # Если ответ заблокирован, возвращаем форматированные описания вместо заглушки
+                # Если ответ заблокирован, возвращаем форматированные безопасные описания
                 if is_blacklist:
-                    logger.info("GigaChat вернул blacklist, возвращаем форматированные описания")
+                    logger.info("🚫 GigaChat вернул blacklist, возвращаем форматированные безопасные описания")
                     
-                    # Форматируем описания так же, как в обычном ответе
+                    # Форматируем безопасные описания
                     formatted_descriptions = []
-                    for i, desc in enumerate(descriptions, 1):
+                    for i, desc in enumerate(descriptions_for_context, 1):
                         if isinstance(desc, dict):
                             content = desc.get("content", "")
                             similarity = desc.get("similarity")
                             source = desc.get("source", "unknown")
                             
+                            # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
+                            external_id = extract_external_id(desc)
+                            
                             formatted_desc = {
                                 "id": i,
                                 "content": content,
-                                "source": source
+                                "source": source,
+                                "feature_data": desc.get("feature_data", {}),
+                                "structured_data": desc.get("structured_data", {})
                             }
+                            
+                            # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
+                            if external_id:
+                                formatted_desc["external_id"] = external_id
                             
                             if similarity is not None:
                                 formatted_desc["similarity"] = round(similarity, 4)
@@ -1101,8 +1642,10 @@ def get_object_description():
                         "use_gigachat_filter": use_gigachat_filter,
                         "use_gigachat_answer": True,
                         "gigachat_restricted": True,
-                        "message": "GigaChat не смог сгенерировать ответ, поэтому возвращены исходные описания",
-                        "formatted": True
+                        "message": "GigaChat не смог сгенерировать ответ, поэтому возвращены исходные безопасные описания",
+                        "formatted": True,
+                        "in_stoplist_filter_applied": True,
+                        "in_stoplist_level": in_stoplist
                     }
 
                     if object_name:
@@ -1112,40 +1655,81 @@ def get_object_description():
                     if filter_data:
                         response_data["filters_applied"] = filter_data
 
+                    # Добавляем информацию о разрешении синонимов
+                    if resolved_object_info and resolved_object_info.get("resolved", False):
+                        response_data["synonym_resolution"] = {
+                            "original_name": resolved_object_info["original_name"],
+                            "resolved_name": object_name,
+                            "original_type": resolved_object_info.get("original_type", object_type)
+                        }
+
                     if debug_mode:
                         response_data["debug"] = debug_info
                         response_data["debug"]["gigachat_generation"] = {
                             "finish_reason": gigachat_result.get("finish_reason"),
                             "blacklist_detected": True,
-                            "fallback_to_descriptions": True
+                            "fallback_to_descriptions": True,
+                            "prompt_saved": save_prompt
                         }
 
                     return jsonify(response_data)
                 
                 # Если ответ не заблокирован, возвращаем обычный ответ GigaChat
                 gigachat_response = gigachat_result.get("content", "")
-                
+
+                # СОБИРАЕМ EXTERNAL_ID ИЗ КОНТЕКСТНЫХ ОПИСАНИЙ
+                external_ids = []
+                source_descriptions_summary = []
+
+                for desc in context_descriptions:
+                    if isinstance(desc, dict):
+                        # ИЗВЛЕКАЕМ EXTERNAL_ID
+                        external_id = extract_external_id(desc)
+                        
+                        desc_summary = {
+                            "content_preview": desc.get("content", "")[:200] + "..." if len(desc.get("content", "")) > 200 else desc.get("content", ""),
+                            "source": desc.get("source", "unknown"),
+                            "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                        }
+                        
+                        if external_id:
+                            desc_summary["external_id"] = external_id
+                            if external_id not in external_ids:
+                                external_ids.append(external_id)
+                                
+                        source_descriptions_summary.append(desc_summary)
+
                 response_data = {
                     "gigachat_answer": gigachat_response,
+                    "external_ids": external_ids,  # СПИСОК ВСЕХ EXTERNAL_ID
+                    "source_descriptions": source_descriptions_summary,  # КРАТКАЯ ИНФОРМАЦИЯ ОБ ИСТОЧНИКАХ
                     "context_used": {
                         "descriptions_count": len(context_descriptions),
                         "total_descriptions": total_count,
-                        "total_characters": len(context)
+                        "blacklisted_excluded": len(blacklisted_descriptions),
+                        "external_ids_count": len(external_ids)
                     },
                     "query": query,
                     "object_name": object_name if object_name else "semantic_search",
-                    "object_type": object_type
+                    "object_type": object_type,
+                    "in_stoplist_level": in_stoplist
                 }
                 
-                # Добавляем debug информацию
+                # Добавляем информацию о разрешении синонимов
+                if resolved_object_info and resolved_object_info.get("resolved", False):
+                    response_data["synonym_resolution"] = {
+                        "original_name": resolved_object_info["original_name"],
+                        "resolved_name": object_name,
+                        "original_type": resolved_object_info.get("original_type", object_type)
+                    }
+                
                 if debug_mode:
                     response_data["debug"] = debug_info
                     response_data["debug"]["gigachat_generation"] = {
-                        "context_samples": [desc["content"][:200] + "..." if len(desc["content"]) > 200 else desc["content"] 
-                                          for desc in context_descriptions[:2]],
                         "response_length": len(gigachat_response),
                         "finish_reason": gigachat_result.get("finish_reason"),
-                        "blacklist_detected": False
+                        "blacklist_detected": False,
+                        "prompt_saved": save_prompt
                     }
 
                 return jsonify(response_data)
@@ -1158,14 +1742,14 @@ def get_object_description():
                     error_response["debug"] = debug_info
                 return jsonify(error_response), 500
 
-        # УЛУЧШЕННАЯ ЛОГИКА: Форматированный ответ без GigaChat
+        # Форматированный ответ без GigaChat
         if not descriptions:
-            response = {"error": "Описание не найдено"}
+            response = {"error": "Я не готов про это разговаривать"}
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 404
 
-        # Форматируем описания в красивый структурированный вид
+        # Форматируем описания
         formatted_descriptions = []
         for i, desc in enumerate(descriptions, 1):
             if isinstance(desc, dict):
@@ -1173,17 +1757,24 @@ def get_object_description():
                 similarity = desc.get("similarity")
                 source = desc.get("source", "unknown")
                 
-                # Создаем структурированную запись
+                # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
+                external_id = extract_external_id(desc)
+                
                 formatted_desc = {
                     "id": i,
                     "content": content,
-                    "source": source
+                    "source": source,
+                    "feature_data": desc.get("feature_data", {}),
+                    "structured_data": desc.get("structured_data", {})
                 }
+                
+                # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
+                if external_id:
+                    formatted_desc["external_id"] = external_id
                 
                 if similarity is not None:
                     formatted_desc["similarity"] = round(similarity, 4)
                     
-                # Извлекаем название из контента (первая строка или первые 50 символов)
                 lines = content.strip().split('\n')
                 if lines and lines[0].strip():
                     formatted_desc["title"] = lines[0].strip()[:100]
@@ -1192,7 +1783,6 @@ def get_object_description():
                     
                 formatted_descriptions.append(formatted_desc)
             else:
-                # Для простых строк
                 formatted_descriptions.append({
                     "id": i,
                     "title": f"Описание {i}",
@@ -1210,17 +1800,27 @@ def get_object_description():
             "query_used": query if query else "simple_search",
             "similarity_threshold": similarity_threshold if query else None,
             "use_gigachat_filter": use_gigachat_filter,
-            "formatted": True  # Флаг что ответ отформатирован
+            "in_stoplist_filter_applied": True,
+            "in_stoplist_level": in_stoplist,
+            "formatted": True
         }
 
-        # Добавляем информацию об объекте, если он был указан
+        # Добавляем информацию об объекте
         if object_name:
             response_data["object_name"] = object_name
             response_data["object_type"] = object_type
 
-        # Добавляем информацию о фильтрах, если они были использованы
+        # Добавляем информацию о фильтрах
         if filter_data:
             response_data["filters_applied"] = filter_data
+
+        # Добавляем информацию о разрешении синонимов
+        if resolved_object_info and resolved_object_info.get("resolved", False):
+            response_data["synonym_resolution"] = {
+                "original_name": resolved_object_info["original_name"],
+                "resolved_name": object_name,
+                "original_type": resolved_object_info.get("original_type", object_type)
+            }
 
         # Добавляем debug информацию
         if debug_mode:
@@ -1235,7 +1835,7 @@ def get_object_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-    
+       
 @app.route("/species/description/", methods=["GET"])
 def get_species_description():
     species_name = request.args.get("species_name")
@@ -1245,6 +1845,7 @@ def get_species_description():
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+    in_stoplist = request.args.get("in_stoplist", "1")  # Новый параметр, по умолчанию 1
 
     if not species_name:
         return jsonify({"error": "species_name parameter is required"}), 400
@@ -1257,7 +1858,8 @@ def get_species_description():
             "limit": limit,
             "similarity_threshold": similarity_threshold,
             "include_similarity": include_similarity,
-            "use_gigachat_filter": use_gigachat_filter
+            "use_gigachat_filter": use_gigachat_filter,
+            "in_stoplist": in_stoplist  # Добавляем в debug информацию
         },
         "timestamp": time.time()
     }
@@ -1286,7 +1888,8 @@ def get_species_description():
                 species_name=species_name,
                 query_embedding=embedding,
                 limit=limit,
-                similarity_threshold=similarity_threshold
+                similarity_threshold=similarity_threshold,
+                in_stoplist=in_stoplist  # Передаем параметр
             )
             
             # Debug информация о результатах поиска
@@ -1298,31 +1901,100 @@ def get_species_description():
                 }
             
             if not include_similarity:
-                descriptions = [{"content": desc["content"], "source": desc.get("source", "unknown")} 
+                descriptions = [{"content": desc["content"], "source": desc.get("source", "unknown"), "feature_data": desc.get("feature_data", {})} 
                               for desc in descriptions]
             else:
                 descriptions = [{"content": desc["content"], 
                                "similarity": desc["similarity"],
-                               "source": desc.get("source", "unknown")} 
+                               "source": desc.get("source", "unknown"),
+                               "feature_data": desc.get("feature_data", {})} 
                               for desc in descriptions]
                 
         else:
             descriptions_text = search_service.get_text_descriptions(species_name)
             
+            # Преобразуем простые строки в словари с feature_data
+            descriptions = []
+            for text in descriptions_text:
+                if isinstance(text, dict):
+                    # Уже форматированный результат с feature_data
+                    descriptions.append(text)
+                else:
+                    # Простая строка - создаем базовую структуру
+                    descriptions.append({
+                        "content": text,
+                        "source": "content",
+                        "feature_data": {}
+                    })
+            
             # Debug информация
             if debug_mode:
                 debug_info["search_method"] = "simple_search"
                 debug_info["search_results"] = {
-                    "total_found": len(descriptions_text)
+                    "total_found": len(descriptions)
                 }
             
             if include_similarity:
-                descriptions = [{"content": text, "similarity": None, "source": "content"} 
-                              for text in descriptions_text]
+                # Добавляем similarity=None для совместимости
+                descriptions = [{"content": desc["content"] if isinstance(desc, dict) else desc, 
+                               "similarity": None, 
+                               "source": desc.get("source", "content") if isinstance(desc, dict) else "content",
+                               "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
+                              for desc in descriptions]
             else:
-                descriptions = [{"content": text, "source": "content"} 
-                              for text in descriptions_text]
+                descriptions = [{"content": desc["content"] if isinstance(desc, dict) else desc, 
+                               "source": desc.get("source", "content") if isinstance(desc, dict) else "content",
+                               "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
+                              for desc in descriptions]
                 
+        # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
+        safe_descriptions = []
+        stoplisted_descriptions = []
+        
+        for desc in descriptions:
+            # Проверяем feature_data на наличие in_stoplist
+            if isinstance(desc, dict):
+                feature_data = desc.get("feature_data", {})
+                desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
+                
+                # Если in_stoplist не указан или <= запрошенному уровню, считаем безопасным
+                try:
+                    requested_level = int(in_stoplist)
+                    if desc_in_stoplist is None or int(desc_in_stoplist) <= requested_level:
+                        safe_descriptions.append(desc)
+                    else:
+                        stoplisted_descriptions.append(desc)
+                        logger.info(f"Исключен документ с in_stoplist={desc_in_stoplist} (запрошен уровень {requested_level}): {species_name}")
+                except (ValueError, TypeError):
+                    # Если ошибка преобразования, используем уровень по умолчанию (1)
+                    if desc_in_stoplist is None or int(desc_in_stoplist) <= 1:
+                        safe_descriptions.append(desc)
+                    else:
+                        stoplisted_descriptions.append(desc)
+                        logger.info(f"Исключен документ с in_stoplist={desc_in_stoplist}: {species_name}")
+            else:
+                # Для простых строк считаем безопасными
+                safe_descriptions.append(desc)
+
+        # Debug информация о фильтрации in_stoplist
+        if debug_mode:
+            debug_info["in_stoplist_filter"] = {
+                "total_before_filter": len(descriptions),
+                "safe_after_filter": len(safe_descriptions),
+                "stoplisted_count": len(stoplisted_descriptions),
+                "requested_level": in_stoplist
+            }
+
+        # Если после фильтрации не осталось безопасных документов
+        if not safe_descriptions:
+            response = {"error": "Я не готов про это разговаривать"}
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response), 400
+
+        # Используем только безопасные описания для дальнейшей обработки
+        descriptions = safe_descriptions
+
         if use_gigachat_filter:
             filter_query = query if query else species_name
             
@@ -1349,12 +2021,15 @@ def get_species_description():
                 }
 
             if not include_similarity:
-                descriptions = [desc["content"] for desc in filtered_descriptions]
+                descriptions = [{"content": desc["content"], 
+                               "source": desc.get("source", "unknown"),
+                               "feature_data": desc.get("feature_data", {})} 
+                              for desc in filtered_descriptions]
             else:
                 descriptions = filtered_descriptions
 
         if not descriptions:
-            response = {"error": "Описание не найдено"}
+            response = {"error": "Я не готов про это разговаривать"}
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 404
@@ -1366,15 +2041,22 @@ def get_species_description():
                 "descriptions": descriptions,
                 "query_used": query if query else "simple_search",
                 "similarity_threshold": similarity_threshold if query else None,
-                "use_gigachat_filter": use_gigachat_filter
+                "use_gigachat_filter": use_gigachat_filter,
+                "in_stoplist_filter_applied": True,
+                "in_stoplist_level": in_stoplist
             }
         else:
             response_data = {
                 "count": len(descriptions),
-                "descriptions": [desc["content"] if isinstance(desc, dict) else desc for desc in descriptions],
+                "descriptions": [{"content": desc["content"] if isinstance(desc, dict) else desc,
+                                "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
+                                "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
+                               for desc in descriptions],
                 "query_used": query if query else "simple_search",
                 "similarity_threshold": similarity_threshold if query else None,
-                "use_gigachat_filter": use_gigachat_filter
+                "use_gigachat_filter": use_gigachat_filter,
+                "in_stoplist_filter_applied": True,
+                "in_stoplist_level": in_stoplist
             }
 
         # Добавляем debug информацию
@@ -1390,39 +2072,6 @@ def get_species_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-    
-
-@app.route("/ask", methods=["POST"])
-def ask_question():
-    try:
-        data = request.get_json()
-        logger.debug(data)
-        question = data.get("question", "")
-        use_agent = data.get("use_agent", False)
-        knowledge_base_type = data.get("knowledge_base_type", "vector")
-        strict_filter = data.get("strict_filter", False)
-        filter_words = data.get("filter_words")
-        
-        if use_agent and knowledge_base_type != "relational":
-            return jsonify({
-                "error": "Для использования агента необходимо knowledge_base_type='relational'"
-            }), 400
-
-        result = search_service.ask_question(
-            question=question,
-            similarity_threshold=float(data.get("similarity_threshold", 0.5)),
-            similarity_deviation=float(data.get("similarity_deviation")) if "similarity_deviation" in data else None,
-            use_gigachat=data.get("use_gigachat", False),
-            user_id=data.get("user_id"),
-            debug_mode=data.get("debug_mode", False),
-            knowledge_base_type=knowledge_base_type,
-            query_formatter="agent" if use_agent else data.get("query_formatter"),
-            strict_filter=strict_filter,
-            filter_words=filter_words  
-        )
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/get_location", methods=["GET"])
 def get_location():
@@ -1445,6 +2094,11 @@ def handle_check():
 def api_get_coords():
     data = request.get_json()
     name = data.get("name")
+    
+    logger.info(f"🔍 /get_coords - получен запрос:")
+    logger.info(f"   - name: {name}")
+    logger.info(f"   - raw_data: {data}")
+    
     if not name:
         return jsonify({"status": "error", "message": "Параметр 'name' обязателен."}), 400
 
@@ -1472,6 +2126,15 @@ def api_coords_to_map():
     object_type = data.get("object_type")
     species_name = data.get("species_name")
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+    in_stoplist_param = request.args.get("in_stoplist", "1")
+    try:
+        if in_stoplist_param.lower() in ['false', 'true']:
+            # Если пришло "false" или "true", используем значение по умолчанию
+            in_stoplist = 1
+        else:
+            in_stoplist = int(in_stoplist_param)
+    except (ValueError, TypeError):
+        in_stoplist = 1
     
     logger.debug(f"""Параметры:{data}""")
     if not lat or not lon:
@@ -1487,12 +2150,13 @@ def api_coords_to_map():
             longitude=float(lon),
             radius_km=float(radius),
             object_type=object_type,
-            species_name=species_name  
+            species_name=species_name,
+            in_stoplist=in_stoplist
         )
         t2 = time.perf_counter()
         objects = result.get("objects", [])
         answer = result.get("answer", "")
-        logger.debug(f"""Найденные объекты: {objects}""")
+        #logger.debug(f"""Найденные объекты: {objects}""")
         
         # Debug информация
         debug_info = {
@@ -1503,7 +2167,8 @@ def api_coords_to_map():
                 "longitude": lon,
                 "radius_km": radius,
                 "object_type": object_type,
-                "species_name": species_name
+                "species_name": species_name,
+                "in_stoplist": in_stoplist
             },
             "objects_count": len(objects),
             "search_query_details": result.get("debug_info", {})
@@ -1513,6 +2178,50 @@ def api_coords_to_map():
             response = {"status": "no_objects", "message": answer}
             if debug_mode:
                 response["debug"] = debug_info
+            return jsonify(response)
+
+        # ФИЛЬТРАЦИЯ ПО STOPLIST для найденных объектов
+        safe_objects = []
+        stoplisted_objects = []
+        
+        for obj in objects:
+            # Проверяем feature_data объектов на in_stoplist
+            feature_data = obj.get("features", {})
+            obj_in_stoplist = feature_data.get("in_stoplist")
+            
+            try:
+                requested_level = int(in_stoplist)
+                if obj_in_stoplist is None or int(obj_in_stoplist) <= requested_level:
+                    safe_objects.append(obj)
+                else:
+                    stoplisted_objects.append(obj)
+                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+            except (ValueError, TypeError):
+                if obj_in_stoplist is None or int(obj_in_stoplist) <= 1:
+                    safe_objects.append(obj)
+                else:
+                    stoplisted_objects.append(obj)
+                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+        
+        objects = safe_objects
+        
+        # Обновляем ответ с учетом фильтрации
+        if stoplisted_objects:
+            answer = f"{answer} (исключено {len(stoplisted_objects)} объектов по уровню безопасности)"
+        
+        # Debug информация о фильтрации stoplist
+        debug_info["stoplist_filter"] = {
+            "total_before_filter": len(result.get("objects", [])),
+            "safe_after_filter": len(objects),
+            "stoplisted_count": len(stoplisted_objects)
+        }
+        
+        if not objects:
+            response = {"status": "no_objects", "message": answer}
+            if debug_mode:
+                response["debug"] = debug_info
+                response["in_stoplist_filter_applied"] = True
+                response["in_stoplist_level"] = in_stoplist
             return jsonify(response)
 
         # Filter out invalid geometries before visualization
@@ -1569,6 +2278,8 @@ def api_coords_to_map():
             }
             if debug_mode:
                 response["debug"] = debug_info
+                response["in_stoplist_filter_applied"] = True
+                response["in_stoplist_level"] = in_stoplist
             return jsonify(response)
 
         # 2. Визуализируем только валидные объекты
@@ -1578,6 +2289,11 @@ def api_coords_to_map():
             map_result["count"] = len(valid_objects)
             map_result["answer"] = answer
             map_result["names"] = [obj.get("name", "Без имени") for obj in valid_objects]
+            
+            # Добавляем информацию о фильтрации по stoplist
+            map_result["in_stoplist_filter_applied"] = True
+            map_result["in_stoplist_level"] = in_stoplist
+            map_result["stoplisted_count"] = len(stoplisted_objects)
             
             # Добавляем debug информацию
             debug_info["render_time"] = round(t3 - t2, 3)
@@ -1598,7 +2314,9 @@ def api_coords_to_map():
                 "status": "error", 
                 "message": f"Ошибка отрисовки карты: {e}",
                 "objects": [obj["name"] for obj in valid_objects],
-                "answer": answer
+                "answer": answer,
+                "in_stoplist_filter_applied": True,
+                "in_stoplist_level": in_stoplist
             }
             if debug_mode:
                 response["debug"] = debug_info
@@ -1683,7 +2401,7 @@ def find_species_with_description():
     name = data.get("name")
     limit = data.get("limit", 5)
     offset = data.get("offset", 0)
-
+    logger.info(f"POST /find_species_with_description - name: {name}, limit: {limit}, offset: {offset}")
     result = slot_val.find_species_with_description(name, limit, offset) 
     return jsonify(result)
 

@@ -30,6 +30,7 @@ def get_gigachat(params: Dict[str, Any] = None) -> GigaChat:
         'model': 'GigaChat:latest',
         'verify_ssl_certs': False,
         'profanity_check': False,
+        'temperature': 0.1, 
         'timeout': 60
     }
     

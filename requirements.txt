@@ -8,6 +8,6 @@ faiss-cpu
 langchain-gigachat
 flask
 flask_cors
-
+redis
 
 

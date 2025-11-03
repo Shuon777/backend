@@ -66,14 +66,15 @@ class GeoService:
     
     @lru_cache(maxsize=1000)
     def _get_nearby_objects_cached(
-        self, 
-        lat_key: float, 
-        lon_key: float, 
-        radius_km: float, 
-        limit: int,
-        obj_type: Optional[str],
-        species_tuple: Optional[Tuple[str]]
-    ) -> List[Dict]:
+            self, 
+            lat_key: float, 
+            lon_key: float, 
+            radius_km: float, 
+            limit: int,
+            obj_type: Optional[str],
+            species_tuple: Optional[Tuple[str]],
+            in_stoplist: int  # Добавить параметр
+        ) -> List[Dict]:
         """
         Кэшированная версия запроса объектов поблизости
         Использует округленные координаты для ключа кэша
@@ -92,29 +93,78 @@ class GeoService:
             radius_km=radius_km,
             limit=limit,
             object_type=obj_type,
-            species_name=species_list
+            species_name=species_list,
+            in_stoplist=in_stoplist  # Передать параметр
         )
+        
+    def create_buffer_geometry(self, original_geometry: dict, buffer_radius_km: float) -> Optional[dict]:
+        """
+        Создает буферную геометрию вокруг исходной геометрии используя PostGIS
+        """
+        conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
+        try:
+            with conn.cursor() as cursor:
+                original_geojson_str = json.dumps(original_geometry)
+                
+                query = """
+                SELECT ST_AsGeoJSON(
+                    ST_Buffer(
+                        ST_GeomFromGeoJSON(%s)::geography,
+                        %s * 1000
+                    )
+                )::json AS buffer_geojson;
+                """
+                
+                cursor.execute(query, (original_geojson_str, buffer_radius_km))
+                result = cursor.fetchone()
+                
+                if result and result['buffer_geojson']:
+                    return result['buffer_geojson']
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка создания буферной геометрии: {str(e)}")
+            return None
+        finally:
+            conn.close()
+        
     def _get_nearby_objects_uncached(
-        self, 
-        latitude: float, 
-        longitude: float, 
-        radius_km: float = 10, 
-        limit: int = 20,
-        object_type: str = None,
-        species_name: Optional[Union[str, List[str]]] = None
-    ) -> List[Dict]:
+    self, 
+    latitude: float, 
+    longitude: float, 
+    radius_km: float = 10, 
+    limit: int = 20,
+    object_type: str = None,
+    species_name: Optional[Union[str, List[str]]] = None,
+    in_stoplist: Union[str, int] = 1  # Принимаем и строку и число
+) -> List[Dict]:
         """
         Основная реализация поиска объектов (без кэширования)
         """
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cursor:
+                # ПРЕОБРАЗОВАНИЕ in_stoplist в число с обработкой строковых значений
+                try:
+                    if isinstance(in_stoplist, str):
+                        if in_stoplist.lower() in ['false', 'true']:
+                            # Если пришло "false" или "true", используем значение по умолчанию
+                            in_stoplist_int = 1
+                        else:
+                            in_stoplist_int = int(in_stoplist)
+                    else:
+                        in_stoplist_int = int(in_stoplist)
+                except (ValueError, TypeError):
+                    # В случае ошибки используем значение по умолчанию
+                    in_stoplist_int = 1
+                
                 # Подготовка параметров запроса
                 params = {
                     'latitude': latitude,
                     'longitude': longitude,
                     'radius_km': radius_km,
-                    'limit': limit
+                    'limit': limit,
+                    'in_stoplist': in_stoplist_int  # Используем преобразованное число
                 }
 
                 # Обработка синонимов видов
@@ -122,7 +172,7 @@ class GeoService:
                     expanded_species = self._expand_species_names(species_name)
                     params['species_patterns'] = [f"%{name}%" for name in expanded_species]
 
-                # Основной запрос
+                # Основной запрос с проверкой in_stoplist для биологических видов
                 query = """
                 WITH user_point AS (
                     SELECT ST_SetSRID(ST_MakePoint(%(longitude)s, %(latitude)s), 4326)::geography AS geom
@@ -170,7 +220,7 @@ class GeoService:
                 # Комбинируем все части запроса
                 entities_query = " UNION ALL ".join(entity_parts)
                 
-                # Условия для фильтрации по виду (с учетом синонимов)
+                # Условия для фильтрации по виду (с учетом синонимов И in_stoplist)
                 species_join = ""
                 species_condition = ""
                 if species_name:
@@ -183,6 +233,13 @@ class GeoService:
                         AND (
                             be_species.common_name_ru ILIKE ANY(%(species_patterns)s) 
                             OR be_species.scientific_name ILIKE ANY(%(species_patterns)s)
+                        )
+                        -- ФИЛЬТРАЦИЯ ПО STOPLIST: используем переданный параметр с обработкой строковых значений
+                        AND (
+                            be_species.feature_data->>'in_stoplist' IS NULL 
+                            OR be_species.feature_data->>'in_stoplist' = 'false'
+                            OR be_species.feature_data->>'in_stoplist' = 'true'
+                            OR (be_species.feature_data->>'in_stoplist')::integer <= %(in_stoplist)s
                         )
                     """
                 
@@ -230,14 +287,15 @@ class GeoService:
             conn.close()
             
     def get_nearby_objects(
-        self, 
-        latitude: float, 
-        longitude: float, 
-        radius_km: float = 10, 
-        limit: int = 20,
-        object_type: str = None,
-        species_name: Optional[Union[str, List[str]]] = None
-    ) -> List[Dict]:
+    self, 
+    latitude: float, 
+    longitude: float, 
+    radius_km: float = 10, 
+    limit: int = 20,
+    object_type: str = None,
+    species_name: Optional[Union[str, List[str]]] = None,
+    in_stoplist: int = 1  # Новый параметр
+) -> List[Dict]:
         """
         Поиск объектов в радиусе от заданной точки с кэшированием
         """
@@ -258,14 +316,15 @@ class GeoService:
         else:
             species_tuple = None
         
-        # Вызываем кэшированную версию
+        # Вызываем кэшированную версию с учетом in_stoplist
         return self._get_nearby_objects_cached(
             lat_key=lat_key,
             lon_key=lon_key,
             radius_km=radius_key,
             limit=limit,
             obj_type=object_type,
-            species_tuple=species_tuple
+            species_tuple=species_tuple,
+            in_stoplist=in_stoplist  # Передаем уровень стоплиста
         )
             
     def get_objects_in_polygon(
