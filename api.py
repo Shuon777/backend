@@ -471,37 +471,14 @@ def objects_in_area_by_type():
             logger.info(f"ℹ️ Синоним для объекта '{object_name}' не найден, используем оригинальное название")
     
     def extract_external_id(feature_data):
-        """Извлекает external_id из feature_data"""
-        if not feature_data:
+        """Упрощенная функция извлечения ID из feature_data"""
+        if not feature_data or not isinstance(feature_data, dict):
             return None
         
-        # Пробуем разные пути к external_id
-        if isinstance(feature_data, dict):
-            # Прямо в meta_info -> external_id
-            if 'meta_info' in feature_data and feature_data['meta_info']:
-                external_id = feature_data['meta_info'].get('external_id')
-                if external_id:
-                    return external_id
-                
-                # Также проверяем meta_info -> id как fallback
-                meta_id = feature_data['meta_info'].get('id')
-                if meta_id:
-                    return meta_id
-            
-            # Прямо в корне feature_data
-            if 'external_id' in feature_data:
-                return feature_data['external_id']
-            
-            # Проверяем другие возможные места
-            if 'id' in feature_data:
-                return feature_data['id']
-                
-            # В других возможных местах
-            for key in ['external_info', 'source_info', 'legacy_data']:
-                if key in feature_data and isinstance(feature_data[key], dict):
-                    external_id = feature_data[key].get('external_id')
-                    if external_id:
-                        return external_id
+        # Из логов видно, что все ID находятся в meta_info -> id
+        meta_info = feature_data.get('meta_info', {})
+        if isinstance(meta_info, dict):
+            return meta_info.get('id')
         
         return None
     
@@ -1237,103 +1214,26 @@ def get_object_description():
 
     # Вспомогательная функция для извлечения external_id
     def extract_external_id(desc_data):
-        """Извлекает external_id из данных описания"""
+        """Упрощенная функция извлечения external_id из данных описания"""
         if not desc_data or not isinstance(desc_data, dict):
             return None
         
-        # Проверяем разные возможные места расположения external_id
-        search_paths = [
-            # Основной путь - в structured_data (если есть)
-            ['structured_data', 'metadata', 'meta_info', 'id'],
-            ['structured_data', 'metadata', 'meta_info', 'external_id'],
-            # В feature_data (основной путь для текущих данных)
-            ['feature_data', 'metadata', 'meta_info', 'id'],
-            ['feature_data', 'metadata', 'meta_info', 'external_id'],
-            ['feature_data', 'meta_info', 'external_id'],
-            ['feature_data', 'meta_info', 'id'],
-            # Прямо в корне feature_data
-            ['feature_data', 'external_id'],
-            ['feature_data', 'id'],
-            # В других возможных местах в feature_data
-            ['feature_data', 'external_info', 'external_id'],
-            ['feature_data', 'source_info', 'external_id'],
-            # Прямо в корне desc_data (если external_id на верхнем уровне)
-            ['external_id'],
-            ['id'],
-            # В других возможных местах
-            ['metadata', 'meta_info', 'id'],
-            ['metadata', 'meta_info', 'external_id'],
-            ['meta_info', 'external_id'],
-            ['meta_info', 'id'],
-            # НОВЫЕ ПУТИ: для работы с данными из relational_service
-            ['structured_data', 'meta_info', 'id'],  # Прямо в structured_data
-            ['structured_data', 'meta_info', 'external_id'],
-            ['meta_info', 'id'],  # На верхнем уровне structured_data
-            ['meta_info', 'external_id'],
-        ]
-        
-        for path in search_paths:
-            current = desc_data
-            found = True
-            
-            for key in path:
-                if isinstance(current, dict) and key in current:
-                    current = current[key]
-                else:
-                    found = False
-                    break
-            
-            if found and current is not None:
-                logger.debug(f"Найден external_id по пути {path}: {current}")
-                return str(current)
-        
-        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Рекурсивный поиск в structured_data
+        # Основной путь: structured_data -> metadata -> meta_info -> id
         if 'structured_data' in desc_data and isinstance(desc_data['structured_data'], dict):
-            # Ищем meta_info/id рекурсивно в structured_data
-            def find_meta_info_recursive(data):
-                if isinstance(data, dict):
-                    # Проверяем текущий уровень
-                    if 'meta_info' in data and isinstance(data['meta_info'], dict):
-                        meta_info = data['meta_info']
-                        if 'id' in meta_info:
-                            return str(meta_info['id'])
-                        elif 'external_id' in meta_info:
-                            return str(meta_info['external_id'])
-                    
-                    # Рекурсивно ищем во всех вложенных словарях
-                    for key, value in data.items():
-                        if isinstance(value, (dict, list)):
-                            result = find_meta_info_recursive(value)
-                            if result:
-                                return result
-                elif isinstance(data, list):
-                    for item in data:
-                        result = find_meta_info_recursive(item)
-                        if result:
-                            return result
-                return None
+            structured_data = desc_data['structured_data']
             
-            recursive_result = find_meta_info_recursive(desc_data['structured_data'])
-            if recursive_result:
-                logger.debug(f"Найден external_id рекурсивно в structured_data: {recursive_result}")
-                return recursive_result
-        
-        # Логируем доступные ключи для отладки
-        available_keys = list(desc_data.keys()) if isinstance(desc_data, dict) else 'not a dict'
-        logger.debug(f"External_id не найден. Доступные ключи: {available_keys}")
-        
-        # Дополнительная отладка: проверим структуру feature_data если он есть
-        if 'feature_data' in desc_data and isinstance(desc_data['feature_data'], dict):
-            feature_keys = list(desc_data['feature_data'].keys())
-            logger.debug(f"Ключи в feature_data: {feature_keys}")
-            
-            # Проверим есть ли metadata в feature_data
-            if 'metadata' in desc_data['feature_data']:
-                metadata_keys = list(desc_data['feature_data']['metadata'].keys()) if isinstance(desc_data['feature_data']['metadata'], dict) else 'not a dict'
-                logger.debug(f"Ключи в metadata: {metadata_keys}")
+            if ('metadata' in structured_data and 
+                isinstance(structured_data['metadata'], dict) and
+                'meta_info' in structured_data['metadata'] and
+                isinstance(structured_data['metadata']['meta_info'], dict)):
+                
+                meta_info = structured_data['metadata']['meta_info']
+                external_id = meta_info.get('id')
+                
+                if external_id:
+                    return str(external_id)
         
         return None
-
     try:
         # Определяем лимиты для разных случаев
         search_limit = limit if limit > 0 else 100
