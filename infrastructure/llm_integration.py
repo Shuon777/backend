@@ -27,11 +27,12 @@ def get_gigachat(params: Dict[str, Any] = None) -> GigaChat:
     # Параметры по умолчанию
     default_params = {
         'credentials': os.getenv("GIGACHAT_CREDENTIALS"),
-        'model': 'GigaChat:latest',
+        'model': 'GigaChat-2-Max',  # Изменено на enterprise модель
         'verify_ssl_certs': False,
         'profanity_check': False,
         'temperature': 0.1, 
-        'timeout': 60
+        'timeout': 120,  # Увеличено время ожидания
+        'scope': 'GIGACHAT_API_CORP'  # Добавлен scope для enterprise
     }
     
     # Объединяем с переданными параметрами

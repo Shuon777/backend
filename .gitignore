@@ -87,8 +87,9 @@ embedding_models/
 project_structure.txt
 knowledge_base_scripts/Relational/pgvector/
 
-**/faiss_index_path/
-**/json_files/
+
+**/json_files/geodb.json
+**/json_files/maps_store.json
 
 **/missing_geometry_objects.json
 **/OFF.xlsx
