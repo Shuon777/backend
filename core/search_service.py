@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 class SearchService:
     def __init__(
     self, 
-    faiss_index_path: str,
     embedding_model_path: str,
     llm_service: Optional[Any] = None,
     species_synonyms_path: Optional[str] = None
@@ -31,7 +30,6 @@ class SearchService:
             embedding_model_path: Путь к модели для эмбеддингов
             llm_service: Сервис LLM (опционально, для тестирования)
         """
-        self.faiss_index_path = faiss_index_path
         self.embedding_model_path = embedding_model_path
         self.llm_service = llm_service or get_gigachat()
         self.relational_service = RelationalService(species_synonyms_path)

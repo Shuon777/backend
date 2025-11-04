@@ -40,7 +40,6 @@ geo = GeoProcessor(maps_dir=MAPS_DIR, domain=DOMAIN)
 slot_val = Slot_validator()
 init_redis(host='localhost', port=6379, db=1, decode_responses=True)
 
-faiss_index_path = os.getenv("FAISS_INDEX_PATH", "./faiss_index_path")
 current_model, current_model_path = embedding_config.get_active_model()
 embedding_model_path = current_model_path
 
@@ -48,7 +47,6 @@ species_synonyms_path = os.getenv("SPECIES_SYNONYMS_PATH",
                                  str(Path(__file__).parent / "json_files" / "species_synonyms.json"))
 
 search_service = SearchService(
-    faiss_index_path=faiss_index_path,
     embedding_model_path=embedding_model_path,
     species_synonyms_path=species_synonyms_path
 )

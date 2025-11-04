@@ -293,6 +293,7 @@ class DatabaseRecreator:
             scientific_name VARCHAR(500),
             description TEXT,
             status VARCHAR(100),
+            type VARCHAR(100),
             feature_data JSONB
         );
 

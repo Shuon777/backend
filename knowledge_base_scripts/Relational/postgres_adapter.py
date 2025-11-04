@@ -524,27 +524,37 @@ class NewResourceImporter:
             print(f"Error finding biological entity: {e}")
         return None
 
-    def process_biological_entity(self, source_id, source_type, name_info, classification, feature_data):
-        """Создаем биологическую сущность и связи с учетом синонимов"""
+    def process_biological_entity(self, source_id, source_type, name_info, classification, feature_data, information_subtype=None):
+        """Создаем биологическую сущность и связи с учетом синонимов и типа"""
         try:
             common_name = self.normalize_species_name(name_info.get('common')) or 'Неизвестный вид'
             scientific_name = name_info.get('scientific')
+            
+            # ОПРЕДЕЛЯЕМ ТИП ИЗ feature_data
+            biological_type = information_subtype
+            if not biological_type and feature_data:
+                biological_type = self.determine_biological_type(feature_data)
             
             bio_id = self.find_biological_entity(common_name, scientific_name)
             
             if not bio_id:
                 self.cur.execute(
-                    "INSERT INTO biological_entity (common_name_ru, scientific_name, description, feature_data) "
-                    "VALUES (%s, %s, %s, %s) RETURNING id",
+                    "INSERT INTO biological_entity (common_name_ru, scientific_name, description, type, feature_data) "
+                    "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                     (
                         common_name,
                         scientific_name,
                         feature_data.get('image_caption'),
+                        biological_type,  # ИСПОЛЬЗУЕМ ОПРЕДЕЛЕННЫЙ ТИП
                         Json({
                             'classification': classification,
                             'habitat': feature_data.get('habitat'),
                             'season': feature_data.get('season'),
-                            'original_names': [name_info.get('common')] 
+                            'original_names': [name_info.get('common')],
+                            # Сохраняем оригинальные поля для истории
+                            'flora_type': feature_data.get('flora_type'),
+                            'fauna_type': feature_data.get('fauna_type'),
+                            'information_subtype': information_subtype
                         })
                     )
                 )
@@ -557,6 +567,13 @@ class NewResourceImporter:
                     self.bio_entity_cache[name_info.get('common')] = bio_id
                     
                 self.add_reliability('biological_entity', bio_id, name_info.get('source'))
+            else:
+                # Если сущность уже существует, обновляем type если он не установлен
+                if biological_type:
+                    self.cur.execute(
+                        "UPDATE biological_entity SET type = %s WHERE id = %s AND type IS NULL",
+                        (biological_type, bio_id)
+                    )
             
             self.cur.execute(
                 "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
@@ -1333,15 +1350,24 @@ class NewResourceImporter:
                     bio_id = self.find_biological_entity(common_name, scientific_name)
                     
                     if not bio_id:
+                        information_subtype = resource.get('information_subtype')
+                        feature_data = resource.get('feature_data', {})
+                        
                         # Создаем новую биологическую сущность
                         self.cur.execute(
-                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description, feature_data) "
-                            "VALUES (%s, %s, %s, %s) RETURNING id",
+                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description, type, feature_data) "
+                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                             (
                                 common_name, 
                                 scientific_name, 
                                 f"Автоматически создано из текста: {title}",
-                                Json({'in_stoplist': in_stoplist_value})  # Сохраняем как число
+                                information_subtype or self.determine_biological_type(feature_data),  # ОПРЕДЕЛЯЕМ ТИП
+                                Json({
+                                    'in_stoplist': in_stoplist_value,
+                                    'information_subtype': information_subtype,
+                                    'flora_type': feature_data.get('flora_type'),
+                                    'fauna_type': feature_data.get('fauna_type')
+                                })
                             )
                         )
                         bio_id = self.cur.fetchone()[0]
@@ -1432,12 +1458,14 @@ class NewResourceImporter:
             
             classification = feature_photo.get('classification_info')
             if classification:
+                information_subtype = resource.get('information_subtype')
                 self.process_biological_entity(
                     image_id, 
                     entity_type,
                     name_info,
                     classification,
-                    feature_photo
+                    feature_photo,
+                    information_subtype
                 )
             
             location = feature_photo.get('location', {})
@@ -1507,6 +1535,28 @@ class NewResourceImporter:
             return resource_id.replace('GEO_', '').replace('_', ' ').strip()
         
         return 'Неизвестный вид'
+    
+    def determine_biological_type(self, feature_data):
+        """Определяет тип биологического объекта на основе flora_type/fauna_type"""
+        if not feature_data:
+            return None
+        
+        # Проверяем fauna_type (приоритет первый)
+        fauna_type = feature_data.get('fauna_type')
+        if fauna_type and fauna_type.strip():  # Проверяем что не пустая строка
+            return "Объект фауны"
+        
+        # Проверяем flora_type
+        flora_type = feature_data.get('flora_type')
+        if flora_type and flora_type.strip():  # Проверяем что не пустая строка
+            return "Объект флоры"
+        
+        # Проверяем information_subtype (резервный вариант)
+        information_subtype = feature_data.get('information_subtype')
+        if information_subtype and information_subtype.strip():
+            return information_subtype
+        
+        return None
 
     def process_map(self, resource):
         identificator = resource['identificator']
@@ -1515,11 +1565,15 @@ class NewResourceImporter:
         
         common_name = self._get_biological_name_from_map(resource)
         
+        information_subtype = resource.get('information_subtype')
+        feature_data = resource.get('feature_data', {})
         bio_id = self._process_biological_entity(
             common_name,
             resource.get('plant_latin_name'),
             name_info.get('source'),
-            resource.get('in_stoplist', False)
+            resource.get('in_stoplist', False),
+            information_subtype,
+            feature_data
         )
 
         # Обрабатываем все географические объекты
@@ -1595,8 +1649,8 @@ class NewResourceImporter:
 
         return bio_id
     
-    def _process_biological_entity(self, common_name, scientific_name, source, in_stoplist_value=None):
-        """Вспомогательный метод для обработки биологической сущности"""
+    def _process_biological_entity(self, common_name, scientific_name, source, in_stoplist_value=None, information_subtype=None, feature_data=None):
+        """Вспомогательный метод для обработки биологической сущности с типом"""
         if not common_name and not scientific_name:
             return None
         
@@ -1605,22 +1659,41 @@ class NewResourceImporter:
             common_name = self.normalize_species_name(common_name)
         
         bio_id = self.find_biological_entity(common_name, scientific_name)
+        
+        # ОПРЕДЕЛЯЕМ ТИП ИЗ feature_data
+        biological_type = information_subtype
+        if not biological_type and feature_data:
+            biological_type = self.determine_biological_type(feature_data)
+        
+        feature_data_dict = {}
+        if in_stoplist_value is not None:
+            feature_data_dict['in_stoplist'] = in_stoplist_value
+        if feature_data:
+            # Сохраняем оригинальные поля
+            feature_data_dict.update({
+                'flora_type': feature_data.get('flora_type'),
+                'fauna_type': feature_data.get('fauna_type'),
+                'information_subtype': information_subtype
+            })
+        
         if bio_id:
+            # Если сущность уже существует, обновляем type если он не установлен
+            if biological_type:
+                self.cur.execute(
+                    "UPDATE biological_entity SET type = %s WHERE id = %s AND type IS NULL",
+                    (biological_type, bio_id)
+                )
             return bio_id
             
         # Создаем новую биологическую сущность
-        feature_data = {}
-        if in_stoplist_value is not None:
-            feature_data['in_stoplist'] = in_stoplist_value  # Сохраняем как число
-        
         self.cur.execute(
             """
             INSERT INTO biological_entity 
-            (common_name_ru, scientific_name, feature_data) 
-            VALUES (%s, %s, %s) 
+            (common_name_ru, scientific_name, type, feature_data) 
+            VALUES (%s, %s, %s, %s) 
             RETURNING id
             """,
-            (common_name, scientific_name, Json(feature_data) if feature_data else None)
+            (common_name, scientific_name, biological_type, Json(feature_data_dict) if feature_data_dict else None)
         )
         bio_id = self.cur.fetchone()[0]
         
@@ -1715,7 +1788,7 @@ if __name__ == "__main__":
     importer = NewResourceImporter()
     try:
         importer.connect()
-        importer.import_resources("../../faiss_index_path/resources_dist.json")
+        importer.import_resources("../../json_files/resources_dist.json")
         importer.save_missing_geometry_objects()
     finally:
         importer.disconnect()
