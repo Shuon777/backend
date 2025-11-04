@@ -1,21 +1,32 @@
-from http.client import HTTPException
-from pathlib import Path
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from urllib.parse import unquote
-import os
-from infrastructure.geo_db_store import get_place, find_place_flexible
-from infrastructure.maps_store import get_map_links
-from core.search_service import SearchService
-from shapely.geometry import shape
-from core.coordinates_finder import GeoProcessor
-from infrastructure.db_utils_for_search import Slot_validator
-from infrastructure.to_nomn import to_prepositional_phrase, find_place_key
-import logging
-import time
-from core.relational_service import RelationalService
-from embedding_config import embedding_config
 import json
+import logging
+import os
+import time
+from pathlib import Path
+from urllib.parse import unquote
+
+import redis
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from http.client import HTTPException
+from shapely.geometry import shape
+
+from core.coordinates_finder import GeoProcessor
+from core.relational_service import RelationalService
+from core.search_service import SearchService
+from embedding_config import embedding_config
+from infrastructure.db_utils_for_search import Slot_validator
+from infrastructure.geo_db_store import find_place_flexible, get_place
+from infrastructure.maps_store import get_map_links
+from infrastructure.to_nomn import find_place_key, to_prepositional_phrase
+from utils import (
+    generate_cache_key, 
+    get_cached_result, 
+    set_cached_result,
+    clear_cache_pattern,
+    get_cache_stats,
+    init_redis
+)
 
 matplotlib_logger = logging.getLogger('matplotlib')
 matplotlib_logger.setLevel(logging.WARNING)
@@ -23,10 +34,11 @@ matplotlib_logger.setLevel(logging.WARNING)
 app = Flask(__name__)
 CORS(app)
 
-MAPS_DIR = "/var/www/map_bot/maps"
-DOMAIN = "https://testecobot.ru"
+MAPS_DIR = os.getenv("MAPS_DIR","/var/www/map_bot/maps")
+DOMAIN = os.getenv("","https://testecobot.ru")
 geo = GeoProcessor(maps_dir=MAPS_DIR, domain=DOMAIN)
 slot_val = Slot_validator()
+init_redis(host='localhost', port=6379, db=1, decode_responses=True)
 
 faiss_index_path = os.getenv("FAISS_INDEX_PATH", "./faiss_index_path")
 current_model, current_model_path = embedding_config.get_active_model()
@@ -161,20 +173,40 @@ def objects_in_polygon():
 @app.route("/objects_in_polygon_simply", methods=["POST"])
 def objects_in_polygon_simply():
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
-    in_stoplist = request.args.get("in_stoplist", "1")  # Новый параметр
+    in_stoplist = request.args.get("in_stoplist", "1")
     logger.info(f"📦 /objects_in_polygon_simply - GET params: {dict(request.args)}")
     logger.info(f"📦 /objects_in_polygon_simply - POST data: {request.get_json()}")
-    debug_info = {
-        "timestamp": time.time(),
-        "steps": []
-    }
-    
+
     data = request.get_json()
     name = data.get("name")
     buffer_radius_km = data.get("buffer_radius_km", 0)
     object_type = data.get("object_type")
     limit = data.get("limit", 20)
+
+    # Параметры для кеша
+    cache_params = {
+        "name": name,
+        "buffer_radius_km": buffer_radius_km,
+        "object_type": object_type,
+        "limit": limit,
+        "in_stoplist": in_stoplist,
+        "version": "v2"
+    }
     
+    redis_key = f"cache:polygon_simply:{generate_cache_key(cache_params)}"
+    debug_info = {
+        "timestamp": time.time(),
+        "cache_key": redis_key,
+        "steps": []
+    }
+
+    # Проверяем кеш
+    cache_hit, cached_result = get_cached_result(redis_key, debug_info)
+    if cache_hit:
+        if debug_mode:
+            cached_result["debug"] = debug_info
+        return jsonify(cached_result)
+
     # Debug информация о параметрах
     debug_info["parameters"] = {
         "name": name,
@@ -384,8 +416,8 @@ def objects_in_polygon_simply():
         })
 
     try:
-        # Используем уникальное имя для файла карты, чтобы избежать проблем с кешированием
-        map_name = f"poly_search_{name.replace(' ', '_')}_{int(time.time())}"
+        # Создаем карту с именем из redis_key (кешированное имя)
+        map_name = redis_key.replace("cache:", "map_").replace(":", "_")
         map_result = geo.draw_custom_geometries(objects_for_map, map_name)
         
         map_result["count"] = len(objects_for_map)
@@ -407,6 +439,9 @@ def objects_in_polygon_simply():
                 "biological_names_count": len(all_biological_names)
             }
             map_result["debug"] = debug_info
+
+        # Сохраняем в кеш (45 минут для поиска по полигону)
+        set_cached_result(redis_key, map_result, expire_time=2700)
         
         return jsonify(map_result)
         
@@ -419,27 +454,49 @@ def objects_in_polygon_simply():
             response["in_stoplist_filter_applied"] = True
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response), 500
-    
+        
 @app.route("/objects_in_area_by_type", methods=["POST"])
 def objects_in_area_by_type():
+    data = request.get_json()
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+
+    # Параметры для кеша
+    cache_params = {
+        "area_name": data.get("area_name"),
+        "object_type": data.get("object_type", "all"),
+        "object_subtype": data.get("object_subtype"),
+        "object_name": data.get("object_name"),
+        "limit": data.get("limit", 20),
+        "search_around": data.get("search_around", False),
+        "buffer_radius_km": data.get("buffer_radius_km", 10.0),
+        "version": "v2"
+    }
+    
+    redis_key = f"cache:area_search:{generate_cache_key(cache_params)}"
     debug_info = {
         "timestamp": time.time(),
+        "cache_key": redis_key,
         "steps": []
     }
+
+    # Проверяем кеш
+    cache_hit, cached_result = get_cached_result(redis_key, debug_info)
+    if cache_hit:
+        if debug_mode:
+            cached_result["debug"] = debug_info
+        return jsonify(cached_result)
+
     logger.info(f"📦 /objects_in_area_by_type - GET params: {dict(request.args)}")
     logger.info(f"📦 /objects_in_area_by_type - POST data: {request.get_json()}")
-    
-    data = request.get_json()
+
     area_name = data.get("area_name")
-    object_type = data.get("object_type", "all")  # Добавляем значение по умолчанию
+    object_type = data.get("object_type", "all") 
     object_subtype = data.get("object_subtype")
     object_name = data.get("object_name")
     limit = data.get("limit", 20)
     search_around = data.get("search_around", False)
     buffer_radius_km = data.get("buffer_radius_km", 10.0)
-    
-    # Debug информация о параметрах
+
     debug_info["parameters"] = {
         "area_name": area_name,
         "object_type": object_type,
@@ -449,8 +506,6 @@ def objects_in_area_by_type():
         "search_around": search_around,
         "buffer_radius_km": buffer_radius_km
     }
-    
-    # РАЗРЕШЕНИЕ СИНОНИМОВ ОБЪЕКТОВ (НОВОЕ)
     resolved_object_info = None
     if object_name:
         resolved_object_info = search_service.resolve_object_synonym(object_name, object_type)
@@ -463,7 +518,6 @@ def objects_in_area_by_type():
         
         if resolved_object_info.get("resolved", False):
             object_name = resolved_object_info["main_form"]
-            # Не меняем object_type, если он не был передан изначально
             if object_type != "all":
                 object_type = resolved_object_info["object_type"]
             logger.info(f"✅ Разрешен синоним объекта: '{resolved_object_info['original_name']}' -> '{object_name}' (тип: {object_type})")
@@ -474,28 +528,25 @@ def objects_in_area_by_type():
         """Упрощенная функция извлечения ID из feature_data"""
         if not feature_data or not isinstance(feature_data, dict):
             return None
-        
-        # Из логов видно, что все ID находятся в meta_info -> id
+
         meta_info = feature_data.get('meta_info', {})
         if isinstance(meta_info, dict):
             return meta_info.get('id')
         
         return None
     
-    # НОВАЯ ЛОГИКА: Если area_name не указан, но есть object_name - ищем объект напрямую
     if not area_name and object_name:
         debug_info["steps"].append({
             "step": "direct_object_search",
             "reason": "area_name not provided, searching object directly",
-            "resolved_name": object_name,  # Добавляем разрешенное имя
-            "resolved_type": object_type   # Добавляем разрешенный тип
+            "resolved_name": object_name,
+            "resolved_type": object_type
         })
         
         try:
-            # Ищем объект по имени без привязки к области (используем разрешенные имя и тип)
             results = search_service.search_objects_directly_by_name(
-                object_name=object_name,  # Используем разрешенное имя
-                object_type=object_type,  # Используем разрешенный тип
+                object_name=object_name,
+                object_type=object_type,
                 object_subtype=object_subtype,
                 limit=limit
             )
@@ -503,7 +554,6 @@ def objects_in_area_by_type():
             objects = results.get("objects", [])
             answer = results.get("answer", "")
             
-            # Debug информация о результатах
             debug_info["search_results"] = {
                 "total_objects_found": len(objects),
                 "search_type": "direct_object_search"
@@ -518,7 +568,6 @@ def objects_in_area_by_type():
                     response["debug"] = debug_info
                 return jsonify(response)
             
-            # Подготавливаем объекты для карты (БЕЗ external_id в popup)
             objects_for_map = []
             
             for obj in objects:
@@ -533,7 +582,6 @@ def objects_in_area_by_type():
                 if description:
                     short_desc = description[:200] + "..." if len(description) > 200 else description
                     popup_html += f"<p>{short_desc}</p>"
-                # УБРАНО: отображение external_id в popup
                 
                 objects_for_map.append({
                     'tooltip': name,
@@ -541,8 +589,8 @@ def objects_in_area_by_type():
                     'geojson': geojson
                 })
             
-            # Создаем карту
-            map_name = f"direct_search_{object_name.replace(' ', '_')}_{int(time.time())}"
+            # Создаем карту с именем из redis_key (кешированное имя)
+            map_name = redis_key.replace("cache:", "map_").replace(":", "_")
             map_result = geo.draw_custom_geometries(objects_for_map, map_name)
             
             # Подготавливаем детальную информацию с external_id (только в данных)
@@ -555,7 +603,7 @@ def objects_in_area_by_type():
                     "name": obj.get('name'), 
                     "description": obj.get('description'),
                     "type": obj.get('type'),
-                    "external_id": external_id,  # external_id только в данных
+                    "external_id": external_id,
                     "geometry_type": obj.get('geometry_type'),
                     "primary_types": obj.get('primary_types', []),
                     "specific_types": obj.get('specific_types', [])
@@ -589,6 +637,9 @@ def objects_in_area_by_type():
                     "search_type": "direct_object_search"
                 }
                 map_result["debug"] = debug_info
+
+            # Сохраняем в кеш (30 минут для прямого поиска)
+            set_cached_result(redis_key, map_result, expire_time=1800)
             
             return jsonify(map_result)
             
@@ -649,9 +700,9 @@ def objects_in_area_by_type():
         # Используем search_service для поиска объектов с новыми параметрами (используем разрешенные имя и тип)
         results = search_service.get_objects_in_area_by_type(
             area_geometry=area_geometry,
-            object_type=object_type,  # Используем разрешенный тип
+            object_type=object_type,
             object_subtype=object_subtype,
-            object_name=object_name,  # Используем разрешенное имя
+            object_name=object_name,
             limit=int(limit),
             search_around=search_around,
             buffer_radius_km=float(buffer_radius_km)
@@ -698,13 +749,13 @@ def objects_in_area_by_type():
         buffer_geometry = None
         if search_around:
             # Создаем буферную зону для визуализации через geo_service
-            buffer_geometry = geo_service.create_buffer_geometry(area_geometry, buffer_radius_km)
+            buffer_geometry = search_service.geo_service.create_buffer_geometry(area_geometry, buffer_radius_km)
             if buffer_geometry:
                 objects_for_map.append({
                     'tooltip': f"Зона поиска (+{buffer_radius_km} км)",
                     'popup': f"<h6>Зона поиска</h6><p>Буферная зона {buffer_radius_km} км вокруг области</p>",
                     'geojson': buffer_geometry,
-                    'style': {'color': 'orange', 'fillOpacity': 0.1, 'weight': 2}  # Стиль для буферной зоны
+                    'style': {'color': 'orange', 'fillOpacity': 0.1, 'weight': 2}
                 })
                 debug_info["steps"].append({
                     "step": "buffer_zone_creation",
@@ -734,8 +785,8 @@ def objects_in_area_by_type():
                 'geojson': geojson
             })
         
-        # Создаем карту
-        map_name = f"area_search_{area_name.replace(' ', '_')}_{int(time.time())}"
+        # Создаем карту с именем из redis_key (кешированное имя)
+        map_name = redis_key.replace("cache:", "map_").replace(":", "_")
         map_result = geo.draw_custom_geometries(objects_for_map, map_name)
         
         # Подготавливаем детальную информацию об объектах
@@ -752,13 +803,13 @@ def objects_in_area_by_type():
                 "geometry_type": obj.get('geometry_type'),
                 "primary_types": obj.get('primary_types', []),
                 "specific_types": obj.get('specific_types', []),
-                "location_type": obj.get('location_type', 'inside')  # Добавляем тип расположения
+                "location_type": obj.get('location_type', 'inside')
             })
         
         map_result["count"] = len(objects)
         map_result["answer"] = answer
         map_result["objects"] = detailed_objects
-        map_result["search_stats"] = search_stats  # Добавляем статистику поиска
+        map_result["search_stats"] = search_stats
         
         # Добавляем информацию о буферной зоне в ответ
         if buffer_geometry:
@@ -794,6 +845,9 @@ def objects_in_area_by_type():
                 "objects_around": search_stats.get('around_area', 0)
             }
             map_result["debug"] = debug_info
+
+        # Сохраняем в кеш (1 час для поиска по области)
+        set_cached_result(redis_key, map_result, expire_time=3600)
         
         return jsonify(map_result)
         
@@ -804,7 +858,7 @@ def objects_in_area_by_type():
         if debug_mode:
             response["debug"] = debug_info
         return jsonify(response), 500
-       
+           
 def validate_geojson_polygon(geojson: dict) -> bool:
     """Проверяет, что GeoJSON содержит валидный полигон"""
     try:
@@ -2029,16 +2083,44 @@ def api_coords_to_map():
     in_stoplist_param = request.args.get("in_stoplist", "1")
     try:
         if in_stoplist_param.lower() in ['false', 'true']:
-            # Если пришло "false" или "true", используем значение по умолчанию
             in_stoplist = 1
         else:
             in_stoplist = int(in_stoplist_param)
     except (ValueError, TypeError):
         in_stoplist = 1
     
+    # Параметры для кеша
+    cache_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "radius_km": radius,
+        "object_type": object_type,
+        "species_name": species_name,
+        "in_stoplist": in_stoplist,
+        "version": "v2"
+    }
+    
+    redis_key = f"cache:coords_search:{generate_cache_key(cache_params)}"
+    debug_info = {
+        "timestamp": time.time(),
+        "cache_key": redis_key,
+        "search_time": 0,
+        "parse_time": round(t_after_parse - t0, 3)
+    }
+
+    # Проверяем кеш
+    cache_hit, cached_result = get_cached_result(redis_key, debug_info)
+    if cache_hit:
+        if debug_mode:
+            cached_result["debug"] = debug_info
+        return jsonify(cached_result)
+
     logger.debug(f"""Параметры:{data}""")
     if not lat or not lon:
-        return jsonify({"status": "error", "message": "Не заданы координаты."}), 400
+        response = {"status": "error", "message": "Не заданы координаты."}
+        if debug_mode:
+            response["debug"] = debug_info
+        return jsonify(response), 400
 
     # Initialize t3 in case visualization fails
     t3 = time.perf_counter()
@@ -2056,23 +2138,19 @@ def api_coords_to_map():
         t2 = time.perf_counter()
         objects = result.get("objects", [])
         answer = result.get("answer", "")
-        #logger.debug(f"""Найденные объекты: {objects}""")
         
         # Debug информация
-        debug_info = {
-            "search_time": round(t2 - t1, 3),
-            "parse_time": round(t_after_parse - t0, 3),
-            "parameters": {
-                "latitude": lat,
-                "longitude": lon,
-                "radius_km": radius,
-                "object_type": object_type,
-                "species_name": species_name,
-                "in_stoplist": in_stoplist
-            },
-            "objects_count": len(objects),
-            "search_query_details": result.get("debug_info", {})
+        debug_info["search_time"] = round(t2 - t1, 3)
+        debug_info["parameters"] = {
+            "latitude": lat,
+            "longitude": lon,
+            "radius_km": radius,
+            "object_type": object_type,
+            "species_name": species_name,
+            "in_stoplist": in_stoplist
         }
+        debug_info["objects_count"] = len(objects)
+        debug_info["search_query_details"] = result.get("debug_info", {})
         
         if not objects:
             response = {"status": "no_objects", "message": answer}
@@ -2184,7 +2262,9 @@ def api_coords_to_map():
 
         # 2. Визуализируем только валидные объекты
         try:
-            map_result = geo.draw_custom_geometries(valid_objects, "custom_map")
+            # Создаем карту с именем из redis_key (кешированное имя)
+            map_name = redis_key.replace("cache:", "map_").replace(":", "_")
+            map_result = geo.draw_custom_geometries(valid_objects, map_name)
             t3 = time.perf_counter()
             map_result["count"] = len(valid_objects)
             map_result["answer"] = answer
@@ -2200,11 +2280,15 @@ def api_coords_to_map():
             debug_info["total_time"] = round(time.perf_counter() - t0, 3)
             debug_info["map_generation"] = {
                 "static_map": map_result.get("static_map"),
-                "interactive_map": map_result.get("interactive_map")
+                "interactive_map": map_result.get("interactive_map"),
+                "map_name": map_name
             }
             
             if debug_mode:
                 map_result["debug"] = debug_info
+
+            # Сохраняем в кеш (30 минут для поиска по координатам)
+            set_cached_result(redis_key, map_result, expire_time=1800)
                 
             return jsonify(map_result)
         except Exception as e:
