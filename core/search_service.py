@@ -658,66 +658,6 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка фильтрации описаний через GigaChat: {str(e)}")
             return descriptions
-            
-    def _filter_docs_with_gigachat(self, query: str, docs: List[Document]) -> List[int]:
-        """Фильтрация документов через LLM"""
-        llm = self._get_llm()
-        
-        if not docs or not query:
-            return list(range(len(docs))) if docs else []
-        docs_text = "\n\n".join(
-            f"Документ {i}:\n{doc.page_content[:1000]}"
-            for i, doc in enumerate(docs))
-        
-        prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=(
-            "Ты эксперт по Байкальской экосистеме. Фильтруй документы СТРОГО по критериям:\n"
-            "1. Документ ДОЛЖЕН содержать ВСЕ элементы запроса: [вид растения] + [тип местности] + [погода]\n"
-            "2. Частичное соответствие = отклонение\n"
-            "3. Если отсутствует ЛЮБОЙ элемент → документ нерелевантен\n\n"
-            
-            "## Формат ответа ТОЛЬКО JSON:\n"
-            "{\n"
-            "  \"relevant_docs\": [список int-индексов] | [],\n"
-            "  \"no_relevant_docs\": bool\n"
-            "}\n\n"
-            
-            "## Критические примеры:\n"
-            "Запрос: 'Покажи Остролодочник в ясную погоду на побережье'\n"
-            "→ Допустимый ответ: {\"relevant_docs\": [], \"no_relevant_docs\": true} (если нет полного соответствия)\n\n"
-            
-            "Запрос: 'Черепоплодник щетинистоватый на песчаном пляже'\n"
-            "→ Недопустимо: указание документа про чаек\n\n"
-            
-            "## Инструкции:\n"
-            "- Не интерпретируй запрос расширительно\n"
-            "- Растения: точное соответствие названий\n"
-            "- Погода: только явные указания в тексте\n"
-            "- ЛЮБОЕ нарушение → no_relevant_docs: true"
-        )),
-        HumanMessage(content=(
-            f"ЗАПРОС: {query}\n\n"
-            f"ДОКУМЕНТЫ ДЛЯ АНАЛИЗА:\n{docs_text}\n\n"
-            "ВЕРНИ JSON ОТВЕТ БЕЗ КОММЕНТАРИЕВ:"
-        ))
-    ])
-        try:
-            chain = prompt | llm | JsonOutputParser()
-            response = chain.invoke({"query": query, "docs": docs_text})
-            
-            # Валидация ответа
-            if response.get("no_relevant_docs", False):
-                return []
-                
-            relevant_indices = [
-                idx for idx in response.get("relevant_docs", [])
-                if isinstance(idx, int) and 0 <= idx < len(docs)
-            ]
-            return relevant_indices
-            
-        except Exception as e:
-            logger.error(f"Ошибка фильтрации через GigaChat: {str(e)}")
-            return list(range(len(docs)))
 
     def get_objects_in_area_by_type(
     self,
