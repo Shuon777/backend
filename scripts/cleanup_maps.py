@@ -34,10 +34,7 @@ def cleanup_orphaned_maps():
 
     try:
         redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            decode_responses=True
+            host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
         )
         redis_client.ping()
         logging.info("Успешное подключение к Redis.")
@@ -49,11 +46,12 @@ def cleanup_orphaned_maps():
         logging.error(f"Директория с картами не найдена: {MAPS_DIR}")
         return
 
-    # Получаем все файлы карт
     try:
-        map_files = []
-        for ext in FILE_EXTENSIONS:
-            map_files.extend([f for f in os.listdir(MAPS_DIR) if f.endswith(ext)])
+        all_files = os.listdir(MAPS_DIR)
+        map_files = [
+            f for f in all_files 
+            if any(f.endswith(ext) for ext in FILE_EXTENSIONS)
+        ]
         logging.info(f"Найдено {len(map_files)} файлов карт в директории.")
     except OSError as e:
         logging.error(f"Ошибка чтения директории {MAPS_DIR}: {e}")
@@ -63,50 +61,55 @@ def cleanup_orphaned_maps():
     kept_count = 0
     error_count = 0
 
-    # Проверяем каждый файл
     for filename in map_files:
         try:
-            # Из имени файла извлекаем redis_key
-            # Формат: map_cache_area_search_xxxxx.jpeg → cache:area_search:xxxxx
-            if filename.startswith("map_cache_"):
-                # Убираем "map_" префикс и расширение
-                clean_name = filename.replace("map_", "").split('.')[0]
-                # Заменяем подчеркивания обратно на двоеточия
-                redis_key = clean_name.replace("_", ":")
-            else:
-                # Для старых файлов с другим форматом имен
-                clean_name = filename.split('.')[0]
-                redis_key = f"cache:map:{clean_name}"
-
-            # Проверяем, существует ли ключ в Redis
-            key_exists = False
-            for prefix in REDIS_KEY_PREFIXES:
-                if redis_key.startswith(prefix):
-                    if redis_client.exists(redis_key):
-                        key_exists = True
-                        break
+            # [ТРЕТЬЕ ИСПРАВЛЕНИЕ] Надежная логика на основе rsplit
             
-            if not key_exists:
-                # Ключа нет - файл "осиротел", удаляем
+            base_name = os.path.splitext(filename)[0]
+            
+            key_part = ""
+            if base_name.startswith("webapp_map_"):
+                key_part = base_name.replace("webapp_map_", "", 1)
+            elif base_name.startswith("map_"):
+                key_part = base_name.replace("map_", "", 1)
+            else:
+                logging.warning(f"Неизвестный формат имени файла: {filename}. Пропускаем.")
+                error_count += 1
+                continue
+            
+            # Разделяем строку по ПОСЛЕДНЕМУ подчеркиванию
+            # "polygon_simply_HASH" -> ["polygon_simply", "HASH"]
+            # "area_search_HASH"  -> ["area_search", "HASH"]
+            try:
+                key_type, key_hash = key_part.rsplit('_', 1)
+            except ValueError:
+                logging.warning(f"Не удалось разделить на тип и хэш: {key_part}. Пропускаем файл {filename}.")
+                error_count += 1
+                continue
+
+            # Собираем правильный ключ
+            redis_key = f"cache:{key_type}:{key_hash}"
+
+            if not redis_client.exists(redis_key):
                 file_path = os.path.join(MAPS_DIR, filename)
                 try:
                     os.remove(file_path)
-                    logging.info(f"Удален осиротевший файл: {filename} (ключ: {redis_key})")
+                    logging.info(f"УДАЛЕН осиротевший файл: {filename} (проверялся ключ: {redis_key})")
                     deleted_count += 1
                 except OSError as e:
                     logging.error(f"Не удалось удалить файл {file_path}: {e}")
                     error_count += 1
             else:
-                # Ключ существует - файл актуален
+                logging.info(f"Файл актуален: {filename} (ключ {redis_key} найден)")
                 kept_count += 1
                 
         except Exception as e:
-            logging.error(f"Ошибка при обработке файла {filename}: {e}")
+            logging.error(f"Критическая ошибка при обработке файла {filename}: {e}", exc_info=True)
             error_count += 1
 
     logging.info("--- Очистка завершена ---")
     logging.info(f"Итог: Проверено - {len(map_files)}, Удалено - {deleted_count}, Оставлено - {kept_count}, Ошибок - {error_count}")
-
+            
 def cleanup_old_redis_keys():
     """
     Дополнительная функция: очистка старых ключей Redis

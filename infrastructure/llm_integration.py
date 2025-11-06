@@ -30,7 +30,7 @@ def get_gigachat(params: Dict[str, Any] = None) -> GigaChat:
         'model': 'GigaChat-2-Max',  # Изменено на enterprise модель
         'verify_ssl_certs': False,
         'profanity_check': False,
-        'temperature': 0.1, 
+        'temperature': 0.0, 
         'timeout': 120,  # Увеличено время ожидания
         'scope': 'GIGACHAT_API_CORP'  # Добавлен scope для enterprise
     }
