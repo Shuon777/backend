@@ -66,49 +66,115 @@ matplotlib_logger.setLevel(logging.WARNING)
 def find_place():
     data = request.get_json()
     place = data.get("place")
+    
+    # Базовые объекты для ответа
+    base_objects = {
+        "used_objects": [],
+        "not_used_objects": []
+    }
+    
     if isinstance(place, list):
-        return jsonify({"error": "Используйте /find_places для поиска нескольких мест"}), 400
+        return jsonify({
+            "error": "Используйте /find_places для поиска нескольких мест",
+            **base_objects
+        }), 400
+    
     if not place:
-        return jsonify({"error": "Place not specified"}), 400
+        return jsonify({
+            "error": "Place not specified",
+            **base_objects
+        }), 400
 
+    # Поиск в базе данных
     record = get_place(place)
     map_links = get_map_links(place)
+    
+    # Если место уже есть в базе
     if record and map_links:
+        used_objects = [{
+            "name": place, 
+            "type": "geographical_entity"
+        }]
+        
         return jsonify({
             "static_map": map_links.get("static"),
             "interactive_map": map_links.get("interactive"),
-            "answer": f"Место '{place}' уже есть в базе. Отдаем сохраненные карты."
+            "answer": f"Место '{place}' уже есть в базе. Отдаем сохраненные карты.",
+            "used_objects": used_objects,
+            "not_used_objects": []
         })
 
+    # Поиск через геосервис
     features = geo.fetch_and_draw(place, True)
+    
+    # Если место не найдено
     if not features:
-        return jsonify({"error": "Place not found", "answer": f"Место '{place}' не найдено."}), 404
+        not_used_objects = [{
+            "name": place,
+            "type": "geographical_entity"
+        }]
+        
+        return jsonify({
+            "error": "Place not found",
+            "answer": f"Место '{place}' не найдено.",
+            "used_objects": [],
+            "not_used_objects": not_used_objects
+        }), 404
 
+    # Если место найдено и сохранено
     map_links = get_map_links(place)
+    used_objects = [{
+        "name": place,
+        "type": "geographical_entity"
+    }]
+
     return jsonify({
         "static_map": map_links.get("static"),
         "interactive_map": map_links.get("interactive"),
-        "answer": f"Найдена и сохранена карта для '{place}'."
+        "answer": f"Найдена и сохранена карта для '{place}'.",
+        "used_objects": used_objects,
+        "not_used_objects": []
     })
 
 @app.route("/find_places", methods=["POST"])
 def find_places():
     data = request.get_json()
     places = data.get("places")
+    
+    # Базовые объекты для ответа
+    base_objects = {
+        "used_objects": [],
+        "not_used_objects": []
+    }
+    
     if not places or not isinstance(places, list):
-        return jsonify({"error": "Places must be a list of names"}), 400
+        return jsonify({
+            "error": "Places must be a list of names",
+            **base_objects
+        }), 400
 
     result = geo.fetch_and_draw_multiple(places)
+    
     if result["status"] == "ok":
-        return jsonify(
-            {
-                "static_map": result["map_image"],
-                "interactive_map": result["web_app_url"],
-                "answer": result["answer"]
-            }
-        )
+        # Все переданные места считаются использованными при успешном результате
+        used_objects = [{"name": place, "type": "geographical_entity"} for place in places]
+        
+        return jsonify({
+            "static_map": result["map_image"],
+            "interactive_map": result["web_app_url"],
+            "answer": result["answer"],
+            "used_objects": used_objects,
+            "not_used_objects": []
+        })
     else:
-        return jsonify({"answer": result["answer"]}), 200
+        # При ошибке все места попадают в not_used_objects
+        not_used_objects = [{"name": place, "type": "geographical_entity"} for place in places]
+        
+        return jsonify({
+            "answer": result["answer"],
+            "used_objects": [],
+            "not_used_objects": not_used_objects
+        }), 200
 
 @app.route("/get_species_area", methods=["POST"])
 def get_species_area():
@@ -116,21 +182,42 @@ def get_species_area():
     center = data.get("center")
     region = data.get("region")
 
+    # Базовые объекты для ответа
+    base_objects = {
+        "used_objects": [],
+        "not_used_objects": []
+    }
+
     if not center or not region:
-        return jsonify({"error": "center and region are required"}), 400
+        return jsonify({
+            "error": "center and region are required",
+            **base_objects
+        }), 400
 
     result = geo.get_species_area_near_center(center, region)
 
     if result["status"] == "ok":
-        return jsonify(
-            {
-                "static_map": result["map_image"],
-                "interactive_map": result["web_app_url"],
-                "answer": result["answer"]
-            }
-        )
+        used_objects = [
+            {"name": center, "type": "geographical_entity"},
+            {"name": region, "type": "geographical_entity"}
+        ]
+        return jsonify({
+            "static_map": result["map_image"],
+            "interactive_map": result["web_app_url"],
+            "answer": result["answer"],
+            "used_objects": used_objects,
+            "not_used_objects": []
+        })
     else:
-        return jsonify({"answer": result["answer"]}), 200
+        not_used_objects = [
+            {"name": center, "type": "geographical_entity"},
+            {"name": region, "type": "geographical_entity"}
+        ]
+        return jsonify({
+            "answer": result["answer"],
+            "used_objects": [],
+            "not_used_objects": not_used_objects
+        }), 200
     
 @app.route("/objects_in_polygon", methods=["POST"])
 def objects_in_polygon():
@@ -353,7 +440,12 @@ def objects_in_polygon_simply():
         return jsonify(response), 500
 
     if not objects:
-        response = {"status": "no_objects", "message": answer}
+        response = {
+            "status": "no_objects", 
+            "message": answer,
+            "used_objects": [],
+            "not_used_objects": []
+        }
         if debug_mode:
             response["debug"] = debug_info
             response["in_stoplist_filter_applied"] = True
@@ -391,8 +483,19 @@ def objects_in_polygon_simply():
     objects_for_map = []
     MAX_NAMES_IN_TOOLTIP = 3  # Максимум имен для краткого отображения
 
+    # Собираем информацию об объектах для фронтенда
+    used_objects = []  # Объекты, которые будут на карте
+    not_used_objects = []  # Объекты, которые не попали на карту
+
     for group_data in grouped_by_geojson.values():
         names = sorted(group_data['names'])
+        
+        # Добавляем объекты в used_objects
+        for name in names:
+            used_objects.append({
+                "name": name,
+                "type": "biological_entity"  # В этом эндпоинте в основном biological_entity
+            })
         
         # 1. Создаем краткий текст для Tooltip (при наведении)
         if len(names) > MAX_NAMES_IN_TOOLTIP:
@@ -413,6 +516,10 @@ def objects_in_polygon_simply():
             'geojson': group_data['geojson']
         })
 
+    # В этом эндпоинте все найденные объекты должны быть used_objects,
+    # так как мы группируем их для отображения на карте
+    # not_used_objects оставляем пустым
+
     try:
         # Создаем карту с именем из redis_key (кешированное имя)
         map_name = redis_key.replace("cache:", "map_").replace(":", "_")
@@ -423,6 +530,10 @@ def objects_in_polygon_simply():
         # В 'grouped_names' теперь отправляем краткие имена для tooltip
         map_result["grouped_names"] = [obj.get("tooltip", "") for obj in objects_for_map]
         map_result["all_biological_names"] = all_biological_names
+        
+        # Добавляем информацию об объектах для фронтенда
+        map_result["used_objects"] = used_objects
+        map_result["not_used_objects"] = not_used_objects
         
         # Добавляем информацию о фильтрации по stoplist
         map_result["in_stoplist_filter_applied"] = True
@@ -446,7 +557,12 @@ def objects_in_polygon_simply():
     except Exception as e:
         logger.error(f"Ошибка отрисовки карты: {e}", exc_info=True)
         debug_info["visualization_error"] = str(e)
-        response = {"status": "error", "message": f"Ошибка отрисовки карты: {e}"}
+        response = {
+            "status": "error", 
+            "message": f"Ошибка отрисовки карты: {e}",
+            "used_objects": [],
+            "not_used_objects": []
+        }
         if debug_mode:
             response["debug"] = debug_info
             response["in_stoplist_filter_applied"] = True
@@ -567,12 +683,21 @@ def objects_in_area_by_type():
                 return jsonify(response)
             
             objects_for_map = []
+            used_objects = []
             
             for obj in objects:
                 name = obj.get('name', 'Без имени')
                 description = obj.get('description', '')
                 geojson = obj.get('geojson', {})
                 obj_type = obj.get('type', 'unknown')
+                
+                # Добавляем объект в used_objects
+                used_objects.append({
+                    "name": name,
+                    "type": obj_type,
+                    "external_id": extract_external_id(obj.get('features', {})),
+                    "geometry_type": obj.get('geometry_type')
+                })
                 
                 popup_html = f"<h6>{name}</h6>"
                 if obj_type:
@@ -610,6 +735,10 @@ def objects_in_area_by_type():
             map_result["count"] = len(objects)
             map_result["answer"] = answer
             map_result["objects"] = detailed_objects
+            
+            # ДОБАВЛЯЕМ used_objects и not_used_objects К СУЩЕСТВУЮЩЕЙ СТРУКТУРЕ
+            map_result["used_objects"] = used_objects
+            map_result["not_used_objects"] = []  # В прямом поиске все объекты используются
             
             # Добавляем информацию о разрешении синонимов в ответ
             if resolved_object_info and resolved_object_info.get("resolved", False):
@@ -732,8 +861,9 @@ def objects_in_area_by_type():
                 response["debug"] = debug_info
             return jsonify(response)
         
-        # Подготавливаем объекты для карты
+        # Подготавливаем объекты для карты и собираем информацию об объектах
         objects_for_map = []
+        used_objects = []
         
         # Добавляем полигон области как первый объект
         area_title = area_info.get('title', area_name) if area_info else area_name
@@ -771,6 +901,16 @@ def objects_in_area_by_type():
             name = obj.get('name', 'Без имени')
             description = obj.get('description', '')
             geojson = obj.get('geojson', {})
+            location_type = obj.get('location_type', 'inside')
+            
+            # Добавляем объект в used_objects
+            used_objects.append({
+                "name": name,
+                "type": obj.get('type', 'unknown'),
+                "external_id": extract_external_id(obj.get('features', {})),
+                "geometry_type": obj.get('geometry_type'),
+                "location_type": location_type
+            })
             
             popup_html = f"<h6>{name}</h6>"
             if description:
@@ -808,6 +948,10 @@ def objects_in_area_by_type():
         map_result["answer"] = answer
         map_result["objects"] = detailed_objects
         map_result["search_stats"] = search_stats
+        
+        # ДОБАВЛЯЕМ used_objects и not_used_objects К СУЩЕСТВУЮЩЕЙ СТРУКТУРЕ
+        map_result["used_objects"] = used_objects
+        map_result["not_used_objects"] = []  # В этом эндпоинте все найденные объекты используются
         
         # Добавляем информацию о буферной зоне в ответ
         if buffer_geometry:
@@ -1038,7 +1182,12 @@ def search_images_by_features():
             features["fruits_present"] = "нет"
             
         if not species_name and not features:
-            return jsonify({"error": "Необходимо указать species_name или features"}), 400
+            response = {
+                "error": "Необходимо указать species_name или features",
+                "used_objects": [],
+                "not_used_objects": []
+            }
+            return jsonify(response), 400
         
         logger.info(f"🔍 /search_images_by_features - получен запрос с параметрами:")
         logger.info(f"   - species_name: {data.get('species_name')}")
@@ -1094,6 +1243,24 @@ def search_images_by_features():
                 result["in_stoplist_level"] = in_stoplist
                 result["stoplisted_count"] = len(stoplisted_images)
             
+            # ============================================================================
+            # ФОРМИРОВАНИЕ used_objects И not_used_objects ДЛЯ ПОИСКА ПО ВИДУ
+            # ============================================================================
+            used_objects = []      # Объекты, соответствующие найденным изображениям
+            not_used_objects = []  # Объекты, не соответствующие критериям (в этом эндпоинте всегда пусто)
+            
+            if result.get("status") == "success" and result.get("images"):
+                # Для поиска по виду - used_objects содержит основной вид
+                used_objects.append({
+                    "name": species_name,
+                    "type": "biological_entity",
+                    "images_count": len(result["images"])
+                })
+            
+            # Добавляем объекты в результат
+            result["used_objects"] = used_objects
+            result["not_used_objects"] = not_used_objects
+            
             # Добавляем debug информацию
             if debug_mode:
                 debug_info["search_type"] = "with_species"
@@ -1110,11 +1277,15 @@ def search_images_by_features():
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
+                # Добавляем пустые объекты для случая "не найдено"
+                result["used_objects"] = []
+                result["not_used_objects"] = []
                 return jsonify(result), 404
             return jsonify(result)
         
         else:
-            result = relational_service.search_images_by_features_only(
+            # Поиск только по признакам (без указания вида)
+            result = search_service.relational_service.search_images_by_features_only(
                 features=features
             )
             
@@ -1147,6 +1318,32 @@ def search_images_by_features():
                 result["in_stoplist_level"] = in_stoplist
                 result["stoplisted_count"] = len(stoplisted_images)
             
+            # ============================================================================
+            # ФОРМИРОВАНИЕ used_objects И not_used_objects ДЛЯ ПОИСКА ТОЛЬКО ПО ПРИЗНАКАМ
+            # ============================================================================
+            used_objects = []      # Виды, соответствующие найденным изображениям
+            not_used_objects = []  # Всегда пустой массив
+            
+            if result.get("status") == "success" and result.get("images"):
+                # Собираем уникальные виды из найденных изображений
+                unique_species = {}
+                for image in result["images"]:
+                    species = image.get("species_name")
+                    if species and species not in unique_species:
+                        unique_species[species] = {
+                            "name": species,
+                            "type": "biological_entity",
+                            "images_count": 0
+                        }
+                    if species:
+                        unique_species[species]["images_count"] += 1
+                
+                used_objects = list(unique_species.values())
+            
+            # Добавляем объекты в результат
+            result["used_objects"] = used_objects
+            result["not_used_objects"] = not_used_objects
+            
             # Добавляем debug информацию
             if debug_mode:
                 debug_info["search_type"] = "features_only"
@@ -1161,6 +1358,9 @@ def search_images_by_features():
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
+                # Добавляем пустые объекты для случая "не найдено"
+                result["used_objects"] = []
+                result["not_used_objects"] = []
                 return jsonify(result), 404
             return jsonify(result)
             
@@ -1168,7 +1368,9 @@ def search_images_by_features():
         logger.error(f"Ошибка поиска изображений по признакам: {str(e)}")
         error_response = {
             "status": "error",
-            "message": f"Ошибка при поиске изображений: {str(e)}"
+            "message": f"Ошибка при поиске изображений: {str(e)}",
+            "used_objects": [],
+            "not_used_objects": []
         }
         if debug_mode:
             debug_info["error"] = str(e)
@@ -1286,6 +1488,7 @@ def get_object_description():
                     return str(external_id)
         
         return None
+
     try:
         # Определяем лимиты для разных случаев
         search_limit = limit if limit > 0 else 100
@@ -1437,6 +1640,13 @@ def get_object_description():
 
             descriptions = filtered_descriptions
 
+        # ============================================================================
+        # ФОРМИРОВАНИЕ used_objects И not_used_objects ДЛЯ РАЗНЫХ СЦЕНАРИЕВ
+        # ============================================================================
+        
+        used_objects = []      # Объекты, использованные в контексте GigaChat
+        not_used_objects = []  # Объекты, не вошедшие в контекст GigaChat
+
         # Обработка use_gigachat_answer
         if use_gigachat_answer:
             if not descriptions:
@@ -1484,6 +1694,33 @@ def get_object_description():
                 context_descriptions = sorted(descriptions_for_context, key=lambda x: x.get('similarity', 0), reverse=True)[:context_limit]
             else:
                 context_descriptions = descriptions_for_context[:context_limit]
+            
+            # ============================================================================
+            # ФОРМИРОВАНИЕ СПИСКОВ ОБЪЕКТОВ ДЛЯ СЦЕНАРИЯ С GIGACHAT
+            # ============================================================================
+            
+            # used_objects - объекты из контекста GigaChat (топ по релевантности)
+            for desc in context_descriptions:
+                if isinstance(desc, dict):
+                    obj_info = {
+                        "name": desc.get("object_name", object_name if object_name else "semantic_search"),
+                        "type": desc.get("object_type", object_type),
+                        "source": desc.get("source", "unknown"),
+                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                    }
+                    used_objects.append(obj_info)
+            
+            # not_used_objects - объекты, не вошедшие в контекст GigaChat
+            remaining_descriptions = [desc for desc in descriptions_for_context if desc not in context_descriptions]
+            for desc in remaining_descriptions:
+                if isinstance(desc, dict):
+                    obj_info = {
+                        "name": desc.get("object_name", object_name if object_name else "semantic_search"),
+                        "type": desc.get("object_type", object_type),
+                        "source": desc.get("source", "unknown"),
+                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                    }
+                    not_used_objects.append(obj_info)
             
             # Объединяем топ безопасных описаний в контекст
             context = "\n\n".join([
@@ -1597,7 +1834,10 @@ def get_object_description():
                         "message": "GigaChat не смог сгенерировать ответ, поэтому возвращены исходные безопасные описания",
                         "formatted": True,
                         "in_stoplist_filter_applied": True,
-                        "in_stoplist_level": in_stoplist
+                        "in_stoplist_level": in_stoplist,
+                        # ДОБАВЛЯЕМ ОБЪЕКТЫ
+                        "used_objects": used_objects,
+                        "not_used_objects": not_used_objects
                     }
 
                     if object_name:
@@ -1664,7 +1904,10 @@ def get_object_description():
                     "query": query,
                     "object_name": object_name if object_name else "semantic_search",
                     "object_type": object_type,
-                    "in_stoplist_level": in_stoplist
+                    "in_stoplist_level": in_stoplist,
+                    # ДОБАВЛЯЕМ ОБЪЕКТЫ
+                    "used_objects": used_objects,
+                    "not_used_objects": not_used_objects
                 }
                 
                 # Добавляем информацию о разрешении синонимов
@@ -1693,6 +1936,24 @@ def get_object_description():
                     debug_info["gigachat_error"] = str(e)
                     error_response["debug"] = debug_info
                 return jsonify(error_response), 500
+
+        # ============================================================================
+        # ФОРМИРОВАНИЕ СПИСКОВ ОБЪЕКТОВ ДЛЯ СЦЕНАРИЯ БЕЗ GIGACHAT
+        # ============================================================================
+        
+        # Для сценария без GigaChat:
+        # used_objects - все найденные объекты (так как они все "используются" в ответе)
+        # not_used_objects - пустой массив
+        
+        for desc in descriptions:
+            if isinstance(desc, dict):
+                obj_info = {
+                    "name": desc.get("object_name", object_name if object_name else "semantic_search"),
+                    "type": desc.get("object_type", object_type),
+                    "source": desc.get("source", "unknown"),
+                    "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                }
+                used_objects.append(obj_info)
 
         # Форматированный ответ без GigaChat
         if not descriptions:
@@ -1754,7 +2015,10 @@ def get_object_description():
             "use_gigachat_filter": use_gigachat_filter,
             "in_stoplist_filter_applied": True,
             "in_stoplist_level": in_stoplist,
-            "formatted": True
+            "formatted": True,
+            # ДОБАВЛЯЕМ ОБЪЕКТЫ
+            "used_objects": used_objects,
+            "not_used_objects": []  # В сценарии без GigaChat все объекты используются
         }
 
         # Добавляем информацию об объекте
@@ -1797,10 +2061,15 @@ def get_species_description():
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
-    in_stoplist = request.args.get("in_stoplist", "1")  # Новый параметр, по умолчанию 1
+    in_stoplist = request.args.get("in_stoplist", "1")
 
     if not species_name:
-        return jsonify({"error": "species_name parameter is required"}), 400
+        response = {
+            "error": "species_name parameter is required",
+            "used_objects": [],
+            "not_used_objects": []
+        }
+        return jsonify(response), 400
 
     # Debug информация
     debug_info = {
@@ -1811,7 +2080,7 @@ def get_species_description():
             "similarity_threshold": similarity_threshold,
             "include_similarity": include_similarity,
             "use_gigachat_filter": use_gigachat_filter,
-            "in_stoplist": in_stoplist  # Добавляем в debug информацию
+            "in_stoplist": in_stoplist
         },
         "timestamp": time.time()
     }
@@ -1836,12 +2105,13 @@ def get_species_description():
                     "first_5_elements": embedding[:5] if isinstance(embedding, list) else "N/A"
                 }
             
-            descriptions = relational_service.get_text_descriptions_with_embedding(
+            # ИСПРАВЛЕНИЕ: Используем relational_service вместо search_service
+            descriptions = search_service.relational_service.get_text_descriptions_with_embedding(
                 species_name=species_name,
                 query_embedding=embedding,
                 limit=limit,
                 similarity_threshold=similarity_threshold,
-                in_stoplist=in_stoplist  # Передаем параметр
+                in_stoplist=in_stoplist
             )
             
             # Debug информация о результатах поиска
@@ -1852,32 +2122,9 @@ def get_species_description():
                     "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions else []
                 }
             
-            if not include_similarity:
-                descriptions = [{"content": desc["content"], "source": desc.get("source", "unknown"), "feature_data": desc.get("feature_data", {})} 
-                              for desc in descriptions]
-            else:
-                descriptions = [{"content": desc["content"], 
-                               "similarity": desc["similarity"],
-                               "source": desc.get("source", "unknown"),
-                               "feature_data": desc.get("feature_data", {})} 
-                              for desc in descriptions]
-                
         else:
-            descriptions_text = search_service.get_text_descriptions(species_name)
-            
-            # Преобразуем простые строки в словари с feature_data
-            descriptions = []
-            for text in descriptions_text:
-                if isinstance(text, dict):
-                    # Уже форматированный результат с feature_data
-                    descriptions.append(text)
-                else:
-                    # Простая строка - создаем базовую структуру
-                    descriptions.append({
-                        "content": text,
-                        "source": "content",
-                        "feature_data": {}
-                    })
+            # ИСПРАВЛЕНИЕ: Используем search_service.get_text_descriptions
+            descriptions = search_service.get_text_descriptions(species_name, in_stoplist=in_stoplist)
             
             # Debug информация
             if debug_mode:
@@ -1885,19 +2132,6 @@ def get_species_description():
                 debug_info["search_results"] = {
                     "total_found": len(descriptions)
                 }
-            
-            if include_similarity:
-                # Добавляем similarity=None для совместимости
-                descriptions = [{"content": desc["content"] if isinstance(desc, dict) else desc, 
-                               "similarity": None, 
-                               "source": desc.get("source", "content") if isinstance(desc, dict) else "content",
-                               "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
-                              for desc in descriptions]
-            else:
-                descriptions = [{"content": desc["content"] if isinstance(desc, dict) else desc, 
-                               "source": desc.get("source", "content") if isinstance(desc, dict) else "content",
-                               "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
-                              for desc in descriptions]
                 
         # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
         safe_descriptions = []
@@ -1939,13 +2173,32 @@ def get_species_description():
 
         # Если после фильтрации не осталось безопасных документов
         if not safe_descriptions:
-            response = {"error": "Я не готов про это разговаривать"}
+            response = {
+                "error": "Я не готов про это разговаривать",
+                "used_objects": [],
+                "not_used_objects": []
+            }
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 400
 
         # Используем только безопасные описания для дальнейшей обработки
         descriptions = safe_descriptions
+
+        # ============================================================================
+        # ФОРМИРОВАНИЕ used_objects И not_used_objects
+        # ============================================================================
+        used_objects = []      # Все найденные объекты (в этом эндпоинте все используются)
+        not_used_objects = []  # Пустой массив (все объекты используются)
+
+        # В этом эндпоинте used_objects содержит информацию о виде
+        for desc in descriptions:
+            used_objects.append({
+                "name": species_name,
+                "type": "biological_entity",
+                "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
+                "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None
+            })
 
         if use_gigachat_filter:
             filter_query = query if query else species_name
@@ -1972,16 +2225,25 @@ def get_species_description():
                     "filtered_out": len(descriptions) - len(filtered_descriptions)
                 }
 
-            if not include_similarity:
-                descriptions = [{"content": desc["content"], 
-                               "source": desc.get("source", "unknown"),
-                               "feature_data": desc.get("feature_data", {})} 
-                              for desc in filtered_descriptions]
-            else:
-                descriptions = filtered_descriptions
+            # Обновляем used_objects после фильтрации Gigachat
+            if filtered_descriptions:
+                used_objects = []
+                for desc in filtered_descriptions:
+                    used_objects.append({
+                        "name": species_name,
+                        "type": "biological_entity", 
+                        "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
+                        "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None
+                    })
+
+            descriptions = filtered_descriptions
 
         if not descriptions:
-            response = {"error": "Я не готов про это разговаривать"}
+            response = {
+                "error": "Я не готов про это разговаривать",
+                "used_objects": [],
+                "not_used_objects": []
+            }
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 404
@@ -1995,7 +2257,10 @@ def get_species_description():
                 "similarity_threshold": similarity_threshold if query else None,
                 "use_gigachat_filter": use_gigachat_filter,
                 "in_stoplist_filter_applied": True,
-                "in_stoplist_level": in_stoplist
+                "in_stoplist_level": in_stoplist,
+                # ДОБАВЛЯЕМ ОБЪЕКТЫ
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects
             }
         else:
             response_data = {
@@ -2008,7 +2273,10 @@ def get_species_description():
                 "similarity_threshold": similarity_threshold if query else None,
                 "use_gigachat_filter": use_gigachat_filter,
                 "in_stoplist_filter_applied": True,
-                "in_stoplist_level": in_stoplist
+                "in_stoplist_level": in_stoplist,
+                # ДОБАВЛЯЕМ ОБЪЕКТЫ
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects
             }
 
         # Добавляем debug информацию
@@ -2019,7 +2287,11 @@ def get_species_description():
         
     except Exception as e:
         logger.error(f"Ошибка получения описания для '{species_name}': {str(e)}", exc_info=True)
-        error_response = {"error": "Внутренняя ошибка сервера"}
+        error_response = {
+            "error": "Внутренняя ошибка сервера",
+            "used_objects": [],
+            "not_used_objects": []
+        }
         if debug_mode:
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
@@ -2052,9 +2324,33 @@ def api_get_coords():
     logger.info(f"   - raw_data: {data}")
     
     if not name:
-        return jsonify({"status": "error", "message": "Параметр 'name' обязателен."}), 400
+        return jsonify({
+            "status": "error", 
+            "message": "Параметр 'name' обязателен.",
+            "used_objects": [],
+            "not_used_objects": []
+        }), 400
 
     result = geo.get_point_coords_from_geodb(name)
+    
+    used_objects = []
+    not_used_objects = []
+    
+    if result.get("status") == "ok":
+        used_objects.append({
+            "name": name,
+            "type": "geographical_entity"
+        })
+    else:
+        not_used_objects.append({
+            "name": name, 
+            "type": "geographical_entity"
+        })
+    
+    # Обновляем результат с объектами
+    result["used_objects"] = used_objects
+    result["not_used_objects"] = not_used_objects
+    
     return jsonify(result)
 
 @app.route("/visualize_objects", methods=["POST"])
@@ -2115,7 +2411,12 @@ def api_coords_to_map():
 
     logger.debug(f"""Параметры:{data}""")
     if not lat or not lon:
-        response = {"status": "error", "message": "Не заданы координаты."}
+        response = {
+            "status": "error", 
+            "message": "Не заданы координаты.",
+            "used_objects": [],
+            "not_used_objects": []
+        }
         if debug_mode:
             response["debug"] = debug_info
         return jsonify(response), 400
@@ -2151,7 +2452,12 @@ def api_coords_to_map():
         debug_info["search_query_details"] = result.get("debug_info", {})
         
         if not objects:
-            response = {"status": "no_objects", "message": answer}
+            response = {
+                "status": "no_objects", 
+                "message": answer,
+                "used_objects": [],
+                "not_used_objects": []
+            }
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response)
@@ -2193,7 +2499,12 @@ def api_coords_to_map():
         }
         
         if not objects:
-            response = {"status": "no_objects", "message": answer}
+            response = {
+                "status": "no_objects", 
+                "message": answer,
+                "used_objects": [],
+                "not_used_objects": []
+            }
             if debug_mode:
                 response["debug"] = debug_info
                 response["in_stoplist_filter_applied"] = True
@@ -2203,6 +2514,13 @@ def api_coords_to_map():
         # Filter out invalid geometries before visualization
         valid_objects = []
         object_details = []
+        
+        # ============================================================================
+        # ФОРМИРОВАНИЕ used_objects И not_used_objects
+        # ============================================================================
+        used_objects = []      # Объекты, которые будут на карте
+        not_used_objects = []  # Объекты, которые не попали на карту (невалидная геометрия)
+        
         for obj in objects:
             try:
                 if obj.get("geojson") and obj["geojson"].get("coordinates"):
@@ -2217,6 +2535,13 @@ def api_coords_to_map():
                                 "type": obj.get("type", "unknown"),
                                 "distance_km": obj.get("distance", "unknown")
                             })
+                            # Добавляем в used_objects
+                            used_objects.append({
+                                "name": obj.get("name", "Без имени"),
+                                "type": obj.get("type", "unknown"),
+                                "distance_km": obj.get("distance", "unknown"),
+                                "geometry_type": "point"
+                            })
                     elif isinstance(obj["geojson"]["coordinates"][0], list):
                         # For polygons/multipoints, check first coordinate
                         first_coord = obj["geojson"]["coordinates"][0][0]
@@ -2229,6 +2554,13 @@ def api_coords_to_map():
                                     "type": obj.get("type", "unknown"),
                                     "distance_km": obj.get("distance", "unknown")
                                 })
+                                # Добавляем в used_objects
+                                used_objects.append({
+                                    "name": obj.get("name", "Без имени"),
+                                    "type": obj.get("type", "unknown"),
+                                    "distance_km": obj.get("distance", "unknown"),
+                                    "geometry_type": "polygon"
+                                })
                         elif len(first_coord) >= 2:
                             lon, lat = first_coord[:2]
                             if -180 <= lon <= 180 and -90 <= lat <= 90:
@@ -2239,8 +2571,31 @@ def api_coords_to_map():
                                     "type": obj.get("type", "unknown"),
                                     "distance_km": obj.get("distance", "unknown")
                                 })
+                                # Добавляем в used_objects
+                                used_objects.append({
+                                    "name": obj.get("name", "Без имени"),
+                                    "type": obj.get("type", "unknown"),
+                                    "distance_km": obj.get("distance", "unknown"),
+                                    "geometry_type": "complex"
+                                })
+                else:
+                    # Объект без геометрии - добавляем в not_used_objects
+                    not_used_objects.append({
+                        "name": obj.get("name", "Без имени"),
+                        "type": obj.get("type", "unknown"),
+                        "distance_km": obj.get("distance", "unknown"),
+                        "reason": "no_geometry"
+                    })
             except Exception as e:
                 logger.warning(f"Invalid geometry in object {obj.get('name')}: {str(e)}")
+                # Добавляем в not_used_objects с причиной ошибки
+                not_used_objects.append({
+                    "name": obj.get("name", "Без имени"),
+                    "type": obj.get("type", "unknown"),
+                    "distance_km": obj.get("distance", "unknown"),
+                    "reason": "invalid_geometry",
+                    "error": str(e)
+                })
                 continue
 
         debug_info["valid_objects_count"] = len(valid_objects)
@@ -2250,7 +2605,9 @@ def api_coords_to_map():
         if not valid_objects:
             response = {
                 "status": "error",
-                "message": "Найдены объекты, но их координаты недействительны для отображения"
+                "message": "Найдены объекты, но их координаты недействительны для отображения",
+                "used_objects": [],
+                "not_used_objects": not_used_objects
             }
             if debug_mode:
                 response["debug"] = debug_info
@@ -2267,6 +2624,10 @@ def api_coords_to_map():
             map_result["count"] = len(valid_objects)
             map_result["answer"] = answer
             map_result["names"] = [obj.get("name", "Без имени") for obj in valid_objects]
+            
+            # ДОБАВЛЯЕМ used_objects и not_used_objects К СУЩЕСТВУЮЩЕЙ СТРУКТУРЕ
+            map_result["used_objects"] = used_objects
+            map_result["not_used_objects"] = not_used_objects
             
             # Добавляем информацию о фильтрации по stoplist
             map_result["in_stoplist_filter_applied"] = True
@@ -2298,7 +2659,9 @@ def api_coords_to_map():
                 "objects": [obj["name"] for obj in valid_objects],
                 "answer": answer,
                 "in_stoplist_filter_applied": True,
-                "in_stoplist_level": in_stoplist
+                "in_stoplist_level": in_stoplist,
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects
             }
             if debug_mode:
                 response["debug"] = debug_info
@@ -2307,7 +2670,12 @@ def api_coords_to_map():
     except Exception as e:
         logger.error(f"Ошибка поиска рядом: {e}")
         debug_info["search_error"] = str(e)
-        response = {"status": "error", "message": f"Ошибка поиска рядом: {e}"}
+        response = {
+            "status": "error", 
+            "message": f"Ошибка поиска рядом: {e}",
+            "used_objects": [],
+            "not_used_objects": []
+        }
         if debug_mode:
             response["debug"] = debug_info
         return jsonify(response), 500
@@ -2383,8 +2751,41 @@ def find_species_with_description():
     name = data.get("name")
     limit = data.get("limit", 5)
     offset = data.get("offset", 0)
+    
     logger.info(f"POST /find_species_with_description - name: {name}, limit: {limit}, offset: {offset}")
-    result = slot_val.find_species_with_description(name, limit, offset) 
+    
+    if not name:
+        return jsonify({
+            "status": "error",
+            "message": "Параметр 'name' обязателен",
+            "used_objects": [],
+            "not_used_objects": []
+        }), 400
+    
+    result = slot_val.find_species_with_description(name, limit, offset)
+    
+    # Добавляем информацию об объектах
+    used_objects = []
+    not_used_objects = []
+    
+    if result.get("status") == "success" and result.get("results"):
+        # Все найденные виды считаются использованными
+        for species in result["results"]:
+            used_objects.append({
+                "name": species.get("name", name),
+                "type": "biological_entity"
+            })
+    else:
+        # Если ничего не найдено, объект попадает в not_used_objects
+        not_used_objects.append({
+            "name": name,
+            "type": "biological_entity" 
+        })
+    
+    # Обновляем результат с объектами
+    result["used_objects"] = used_objects
+    result["not_used_objects"] = not_used_objects
+    
     return jsonify(result)
 
 @app.route("/")
