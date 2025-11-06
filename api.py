@@ -265,28 +265,32 @@ def objects_in_polygon_simply():
         for obj in objects if obj.get('type') == 'biological_entity'
     )))
 
-    # Группируем объекты по геометрии
+    # Группируем объекты по геометрии и типу
     grouped_by_geojson = {}
     for obj in objects:
         if 'geojson' not in obj or not obj['geojson']:
             continue
         geojson_key = json.dumps(obj['geojson'], sort_keys=True)
+        obj_type = obj.get('type', 'unknown')  # Получаем тип объекта
+        
         if geojson_key not in grouped_by_geojson:
             grouped_by_geojson[geojson_key] = {
                 'geojson': obj['geojson'],
+                'type': obj_type,  # Сохраняем тип первого объекта в группе
                 'names': []
             }
         object_name = obj.get('name', 'Без имени')
         if object_name not in grouped_by_geojson[geojson_key]['names']:
-             grouped_by_geojson[geojson_key]['names'].append(object_name)
+            grouped_by_geojson[geojson_key]['names'].append(object_name)
 
     # Debug информация о группировке
     debug_info["grouping"] = {
         "total_groups": len(grouped_by_geojson),
-        "objects_per_group": [len(group['names']) for group in grouped_by_geojson.values()]
+        "objects_per_group": [len(group['names']) for group in grouped_by_geojson.values()],
+        "group_types": [group.get('type', 'unknown') for group in grouped_by_geojson.values()]
     }
 
-    # --- НОВАЯ ЛОГИКА ФОРМИРОВАНИЯ ТЕКСТА ---
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА ФОРМИРОВАНИЯ ТЕКСТА ---
     objects_for_map = []
     MAX_NAMES_IN_TOOLTIP = 3  # Максимум имен для краткого отображения
 
@@ -296,12 +300,13 @@ def objects_in_polygon_simply():
 
     for group_data in grouped_by_geojson.values():
         names = sorted(group_data['names'])
+        obj_type = group_data.get('type', 'unknown')  # Получаем тип из group_data
         
         # Добавляем объекты в used_objects
         for name in names:
             used_objects.append({
                 "name": name,
-                "type": "biological_entity"  # В этом эндпоинте в основном biological_entity
+                "type": obj_type
             })
         
         # 1. Создаем краткий текст для Tooltip (при наведении)
@@ -310,8 +315,12 @@ def objects_in_polygon_simply():
         else:
             tooltip_text = ", ".join(names)
 
-        # 2. Создаем красивый HTML для Popup (при клике)
-        popup_html = f"<h6>Обнаружено видов: {len(names)}</h6>"
+        # 2. Создаем красивый HTML для Popup (при клике) с учетом типа
+        if obj_type == "biological_entity":
+            popup_html = f"<h6>Обнаружено видов: {len(names)}</h6>"
+        else:
+            popup_html = f"<h6>Обнаружено объектов: {len(names)}</h6>"
+        
         popup_html += '<ul style="padding-left: 20px; margin-top: 5px;">'
         for n in names:
             popup_html += f"<li>{n}</li>"
