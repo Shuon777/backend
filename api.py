@@ -2371,5 +2371,6 @@ def find_species_with_description():
 def home():
     return "SalutBot API works!"
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5555)
+# Запускается через gunicorn
+# if __name__ == "__main__":
+#     app.run(host="0.0.0.0", port=5555)

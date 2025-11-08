@@ -1,7 +1,7 @@
 import json
 import os
 
-MAPS_REGISTRY_PATH = "/var/www/salut_bot/json_files/maps_store.json"
+MAPS_REGISTRY_PATH = "json_files/maps_store.json"
 
 if not os.path.exists(MAPS_REGISTRY_PATH):
     with open(MAPS_REGISTRY_PATH, "w") as f:

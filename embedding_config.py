@@ -13,7 +13,7 @@ def get_model_dimension(model_name):
 
 class EmbeddingConfig:
     def __init__(self):
-        self.BASE_MODELS_DIR = "/var/www/salut_bot/embedding_models"
+        self.BASE_MODELS_DIR = "embedding_models"
         self.CONFIG_FILE = os.path.join(self.BASE_MODELS_DIR, "active_model.json")
         
         os.makedirs(self.BASE_MODELS_DIR, exist_ok=True)

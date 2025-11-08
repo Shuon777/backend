@@ -15,7 +15,7 @@ morph = pymorphy2.MorphAnalyzer()
 def normalize_morph(text: str) -> str:
     return ' '.join([morph.parse(word)[0].normal_form for word in text.lower().split()])
 
-DB_PATH = "/var/www/salut_bot/json_files/geodb.json"
+DB_PATH = "json_files/geodb.json"
 
 if not os.path.exists(DB_PATH):
     with open(DB_PATH, "w") as f:

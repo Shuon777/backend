@@ -1,0 +1,19 @@
+services:
+  redis:
+    image: redis:alpine
+    network_mode: "host"
+
+  backend:
+    build: 
+      context: .
+      network: host
+    network_mode: "host"
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /var/www/map_bot/maps:/var/www/map_bot/maps
+    depends_on:
+      - redis
