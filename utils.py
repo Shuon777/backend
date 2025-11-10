@@ -33,7 +33,7 @@ def generate_cache_key(params: dict) -> str:
     Ключи сортируются, чтобы порядок не влиял на результат.
     """
     canonical_string = json.dumps(params, sort_keys=True, ensure_ascii=False).encode('utf-8')
-    return hashlib.md5(canonical_string).hexdigest()
+    return hashlib.sha1(canonical_string).hexdigest()
 
 def get_cached_result(cache_key: str, debug_info: dict = None) -> Tuple[bool, Optional[Any]]:
     """

@@ -3,35 +3,28 @@
 import os
 import redis
 import logging
-from datetime import datetime
+from pathlib import Path
+import argparse # Для добавления --dry-run
 
 # --- НАСТРОЙКИ ---
-MAPS_DIR = "/var/www/map_bot/maps"
+# Используем Path для работы с путями - это удобнее и безопаснее
+MAPS_DIR = Path("/var/www/map_bot/maps")
 REDIS_HOST = "localhost"
 REDIS_PORT = 6379
 REDIS_DB = 1
-# Префиксы ключей, которые мы используем в API
-REDIS_KEY_PREFIXES = [
-    "cache:area_search:",
-    "cache:coords_search:", 
-    "cache:polygon_simply:"
-]
-# Расширения файлов карт (проверьте какие реально используются)
-FILE_EXTENSIONS = [".jpeg", ".png", ".html"]
+# Префиксы для поиска ключей в Redis
+REDIS_KEY_PATTERN = "cache:*:*"
 # -----------------
 
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
-def cleanup_orphaned_maps():
-    """
-    Удаляет файлы карт, для которых истек срок действия ключа в Redis.
-    """
-    logging.info("--- Запуск скрипта очистки старых карт ---")
-
+def get_active_redis_hashes() -> set:
+    """Подключается к Redis и возвращает набор всех активных хэшей карт."""
     try:
         redis_client = redis.Redis(
             host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
@@ -40,109 +33,81 @@ def cleanup_orphaned_maps():
         logging.info("Успешное подключение к Redis.")
     except redis.exceptions.ConnectionError as e:
         logging.error(f"Не удалось подключиться к Redis: {e}")
+        return set()
+
+    # Получаем ВСЕ ключи, которые соответствуют нашему шаблону
+    active_keys = redis_client.keys(REDIS_KEY_PATTERN)
+    
+    # Из каждого ключа вида "cache:area_search:HASH" извлекаем только HASH
+    active_hashes = {key.split(':')[-1] for key in active_keys}
+    
+    logging.info(f"Найдено {len(active_hashes)} активных ключей/хэшей в Redis DB {REDIS_DB}.")
+    return active_hashes
+
+def cleanup_orphaned_maps(dry_run: bool = True):
+    """
+    Сравнивает файлы на диске с активными хэшами в Redis и удаляет "осиротевшие".
+    """
+    if dry_run:
+        logging.warning("--- Запуск в режиме СУХОГО ПРОГОНА (DRY RUN). Файлы не будут удалены. ---")
+    else:
+        logging.info("--- Запуск в РАБОЧЕМ режиме. Файлы будут удалены. ---")
+
+    active_hashes = get_active_redis_hashes()
+    if not active_hashes:
+        logging.warning("Не найдено активных ключей в Redis. Очистка прервана для безопасности.")
         return
 
-    if not os.path.isdir(MAPS_DIR):
+    if not MAPS_DIR.is_dir():
         logging.error(f"Директория с картами не найдена: {MAPS_DIR}")
         return
 
-    try:
-        all_files = os.listdir(MAPS_DIR)
-        map_files = [
-            f for f in all_files 
-            if any(f.endswith(ext) for ext in FILE_EXTENSIONS)
-        ]
-        logging.info(f"Найдено {len(map_files)} файлов карт в директории.")
-    except OSError as e:
-        logging.error(f"Ошибка чтения директории {MAPS_DIR}: {e}")
-        return
-
-    deleted_count = 0
-    kept_count = 0
-    error_count = 0
-
-    for filename in map_files:
-        try:
-            # [ТРЕТЬЕ ИСПРАВЛЕНИЕ] Надежная логика на основе rsplit
-            
-            base_name = os.path.splitext(filename)[0]
-            
-            key_part = ""
-            if base_name.startswith("webapp_map_"):
-                key_part = base_name.replace("webapp_map_", "", 1)
-            elif base_name.startswith("map_"):
-                key_part = base_name.replace("map_", "", 1)
-            else:
-                logging.warning(f"Неизвестный формат имени файла: {filename}. Пропускаем.")
-                error_count += 1
-                continue
-            
-            # Разделяем строку по ПОСЛЕДНЕМУ подчеркиванию
-            # "polygon_simply_HASH" -> ["polygon_simply", "HASH"]
-            # "area_search_HASH"  -> ["area_search", "HASH"]
+    # Статистика
+    files_checked = 0
+    files_to_delete = 0
+    
+    # Итерируемся по всем файлам в директории
+    for file_path in MAPS_DIR.glob('*'):
+        if file_path.is_file():
+            files_checked += 1
+            # Из имени файла 'map_area_search_HASH.jpeg' извлекаем 'HASH'
+            # rsplit('_', 1) - делит строку по последнему '_'
+            # [0] - берем первую часть, [-1] - вторую
             try:
-                key_type, key_hash = key_part.rsplit('_', 1)
-            except ValueError:
-                logging.warning(f"Не удалось разделить на тип и хэш: {key_part}. Пропускаем файл {filename}.")
-                error_count += 1
+                file_hash = file_path.stem.rsplit('_', 1)[-1]
+            except IndexError:
+                logging.warning(f"Не удалось извлечь хэш из имени файла: {file_path.name}. Пропускаем.")
                 continue
 
-            # Собираем правильный ключ
-            redis_key = f"cache:{key_type}:{key_hash}"
-
-            if not redis_client.exists(redis_key):
-                file_path = os.path.join(MAPS_DIR, filename)
-                try:
-                    os.remove(file_path)
-                    logging.info(f"УДАЛЕН осиротевший файл: {filename} (проверялся ключ: {redis_key})")
-                    deleted_count += 1
-                except OSError as e:
-                    logging.error(f"Не удалось удалить файл {file_path}: {e}")
-                    error_count += 1
-            else:
-                logging.info(f"Файл актуален: {filename} (ключ {redis_key} найден)")
-                kept_count += 1
+            # Если хэш файла НЕ НАЙДЕН в списке активных хэшей из Redis...
+            if file_hash not in active_hashes:
+                files_to_delete += 1
+                logging.info(f"Найден осиротевший файл: {file_path.name}")
                 
-        except Exception as e:
-            logging.error(f"Критическая ошибка при обработке файла {filename}: {e}", exc_info=True)
-            error_count += 1
+                if not dry_run:
+                    try:
+                        file_path.unlink()
+                        logging.warning(f"  -> УДАЛЕН: {file_path.name}")
+                    except OSError as e:
+                        logging.error(f"  -> ОШИБКА УДАЛЕНИЯ: {e}")
 
     logging.info("--- Очистка завершена ---")
-    logging.info(f"Итог: Проверено - {len(map_files)}, Удалено - {deleted_count}, Оставлено - {kept_count}, Ошибок - {error_count}")
-            
-def cleanup_old_redis_keys():
-    """
-    Дополнительная функция: очистка старых ключей Redis
-    которые уже истекли, но файлы могли остаться
-    """
-    logging.info("--- Очистка старых ключей Redis ---")
-    
-    try:
-        redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            decode_responses=True
-        )
-        
-        deleted_keys = 0
-        for prefix in REDIS_KEY_PREFIXES:
-            # Ищем все ключи с нашими префиксами
-            keys = redis_client.keys(f"{prefix}*")
-            for key in keys:
-                # Проверяем TTL ключа
-                ttl = redis_client.ttl(key)
-                if ttl == -2:  # Ключ уже удален
-                    continue
-                elif ttl == -1:  # Ключ без TTL (должен быть с TTL)
-                    logging.warning(f"Найден ключ без TTL: {key}")
-                # Можно добавить логику для удаления очень старых ключей
-                # если TTL меньше определенного значения
-                
-        logging.info(f"Проверено ключей Redis: {len(keys)}")
-        
-    except Exception as e:
-        logging.error(f"Ошибка при очистке ключей Redis: {e}")
+    if dry_run:
+        logging.info(f"Итог (Dry Run): Проверено файлов - {files_checked}. Найдено для удаления - {files_to_delete}.")
+        logging.info("Для реального удаления запустите скрипт с флагом --execute")
+    else:
+        logging.info(f"Итог: Проверено файлов - {files_checked}. Удалено - {files_to_delete}.")
 
 if __name__ == "__main__":
-    cleanup_orphaned_maps()
+    # Добавляем парсер аргументов для безопасного запуска
+    parser = argparse.ArgumentParser(description="Удаляет старые файлы карт, ключи которых истекли в Redis.")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Запустить скрипт в рабочем режиме (реально удалять файлы)."
+    )
+    args = parser.parse_args()
+
+    # По умолчанию dry_run=True (безопасный режим)
+    # Если запустить с флагом --execute, то dry_run станет False
+    cleanup_orphaned_maps(dry_run=not args.execute)
