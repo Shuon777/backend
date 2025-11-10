@@ -96,14 +96,24 @@ class GeoProcessor:
         # Сохранение карты
         filename = f"{place_name}.jpeg"  # 1. Меняем расширение файла на .jpeg
         image_path = os.path.join(self.maps_dir, filename)
-        plt.savefig(
-            image_path,
-            format='jpeg',         # 2. Указываем формат JPEG
-            dpi=180,               # 3. Снижаем DPI до 150 (разумный компромисс)          # 4. Устанавливаем качество JPEG (85 - хороший баланс)
-            bbox_inches='tight',
-            pad_inches=0
-        )
-        plt.close()
+        try:
+            # 1. Открываем файл для записи в бинарном режиме
+            with open(image_path, 'wb') as f:
+                # 2. Передаем в savefig не путь, а файловый объект f
+                plt.savefig(
+                    f,
+                    format='jpeg',
+                    dpi=180,
+                    bbox_inches='tight',
+                    pad_inches=0
+                )
+                # 3. Принудительно сбрасываем буферы на диск, чтобы гарантировать запись
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            # 4. Гарантированно закрываем фигуру, чтобы освободить память
+            plt.close()
+        # --- КОНЕЦ ИСПРАВЛЕНИЙ ---
 
         static_map_url = f"{self.domain}/maps/{filename}"
         web_app_url = self.generate_folium_map(geometry, place_name)

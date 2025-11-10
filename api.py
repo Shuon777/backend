@@ -2372,5 +2372,5 @@ def home():
     return "SalutBot API works!"
 
 # Запускается через gunicorn
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=5555)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5555)
