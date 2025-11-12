@@ -69,11 +69,16 @@ class RelationalService:
                     all_names = [species_name]
                     
                 for name in all_names:
-                    species_conditions.append("be.common_name_ru ILIKE %s")
-                    params.append(f'%{name}%')
+                    # ИСПРАВЛЕНИЕ: Используем более простой подход с word boundaries
+                    # Заменяем пробелы и дефисы на шаблоны, которые могут содержать пробелы/дефисы
+                    pattern = r'\y' + name.replace(' ', r'[ -]?').replace('-', r'[ -]?') + r'\y'
+                    species_conditions.append("be.common_name_ru ~* %s")  # ~* для регистронезависимого поиска
+                    params.append(pattern)
             else:
-                species_conditions.append("be.common_name_ru ILIKE %s")
-                params.append(f'%{species_name}%')
+                # ИСПРАВЛЕНИЕ: Для случая без синонимов
+                pattern = r'\y' + species_name.replace(' ', r'[ -]?').replace('-', r'[ -]?') + r'\y'
+                species_conditions.append("be.common_name_ru ~* %s")
+                params.append(pattern)
             
             sql_query = """
             SELECT 
@@ -92,7 +97,6 @@ class RelationalService:
                 AND eil.entity_type = 'image_content'
             JOIN entity_identifier ei ON ei.id = eil.identifier_id
             WHERE (""" + " OR ".join(species_conditions) + ")"
-            
             
             feature_conditions = []
             for key, value in features.items():
@@ -133,6 +137,7 @@ class RelationalService:
             
             logger.info(f"Searching for species: {species_name}")
             logger.info(f"Using synonyms: {synonyms_data}")
+            logger.info(f"Generated patterns: {params[:len(all_names) if 'all_names' in locals() else 1]}")
             
             results = self.execute_query(sql_query, tuple(params))
             
@@ -170,6 +175,7 @@ class RelationalService:
                 "status": "error",
                 "message": f"Ошибка при поиске изображений: {str(e)}"
             }
+            
     def search_images_by_features_only(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
         Поиск изображений только по признакам (без привязки к виду)
