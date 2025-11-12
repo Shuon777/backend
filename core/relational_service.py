@@ -1233,7 +1233,7 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
             params['object_name'] = f'%{object_name}%'
         
         # Фильтрация по типу объекта
-        if object_type:
+        if object_type and object_type != "all":  # Добавьте проверку на "all"
             conditions.append("""
                 (
                     ge.feature_data->'geo_type'->'primary_type' ? %(object_type)s
