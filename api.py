@@ -1469,7 +1469,7 @@ def get_object_description():
                                 
                             lines = content.strip().split('\n')
                             if lines and lines[0].strip():
-                                formatted_desc["title"] = lines[0].strip()[:100]
+                                formatted_desc["title"] = lines[0].strip()
                             else:
                                 formatted_desc["title"] = f"Описание {i}"
                                 
