@@ -401,62 +401,42 @@ class NewResourceImporter:
             print(f"Error adding reliability: {e}")
 
     def create_entity_identifier(self, entity_id, entity_type, identificator, access_or_meta):
-        """Создаем идентификаторы сущностей с разделением наших и внешних ID"""
+        """Создаем идентификаторы сущностей с поддержкой meta_info"""
         name_info = identificator.get('name', {})
         try:
-            # Определяем тип данных и источники ID
+            # Определяем, переданы ли access_options или meta_info
             if 'url' in access_or_meta or 'external_title' in access_or_meta:
-                # Это meta_info - ВНЕШНИЕ данные (сайт Байкальского музея)
+                # Это meta_info
                 meta_info = access_or_meta
-                source_url = meta_info.get('url')  # ВНЕШНИЙ URL
+                source_url = meta_info.get('url')
                 external_title = meta_info.get('external_title')
                 video_url = meta_info.get('video')
-                
-                # Для meta_info: source_url - это ВНЕШНИЙ ID
-                our_id = None  # У meta_info нет нашего внутреннего ID
-                external_id = source_url  # Внешний ID сайта музея
-                
             else:
-                # Это access_options - НАШИ внутренние данные
-                source_url = access_or_meta.get('source_url')  # НАШ внутренний URL/ID
+                # Это access_options (старый формат)
+                source_url = access_or_meta.get('source_url')
                 external_title = access_or_meta.get('original_title')
                 video_url = None
-                
-                # Для access_options: source_url - это НАШ внутренний ID
-                our_id = source_url  # Наш внутренний ID
-                external_id = None   # У access_options нет внешнего ID
 
-            # Извлекаем имя из identificator (это общее для обоих форматов)
-            common_name = name_info.get('common') or external_title
-
-            # СОЗДАЕМ ИДЕНТИФИКАТОР с указанием типа ID
             self.cur.execute(
-                "INSERT INTO entity_identifier (url, file_path, name_ru, name_en, name_latin, feature_data) "
-                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                "INSERT INTO entity_identifier (url, file_path, name_ru, name_en, name_latin) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                 (
-                    source_url,  # URL (может быть как наш, так и внешний)
-                    access_or_meta.get('file_path'),
-                    common_name,
+                    source_url,
+                    access_or_meta.get('file_path'),  # Может быть в обоих форматах
+                    name_info.get('common') or external_title,
                     name_info.get('en_name'),
-                    name_info.get('scientific'),
-                    Json({
-                        'id_type': 'internal' if our_id else 'external',  # Указываем тип ID
-                        'internal_id': our_id,      # Наш внутренний ID (только для access_options)
-                        'external_id': external_id, # Внешний ID (только для meta_info)
-                        'source_system': 'internal_system' if our_id else 'baikal_museum'
-                    })
+                    name_info.get('scientific')
                 )
             )
             identifier_id = self.cur.fetchone()[0]
             
-            # Связываем с сущностью
             self.cur.execute(
                 "INSERT INTO entity_identifier_link (entity_id, entity_type, identifier_id) "
                 "VALUES (%s, %s, %s)",
                 (entity_id, entity_type, identifier_id)
             )
             
-            # Обработка видео (общее для обоих форматов)
+            # Если есть video URL, создаем external_link
             video_url = access_or_meta.get('video')
             if video_url:
                 self.cur.execute(
@@ -464,13 +444,14 @@ class NewResourceImporter:
                     "VALUES (%s, %s, %s, %s) RETURNING id",
                     (
                         video_url,
-                        f"Видео: {common_name}",
+                        f"Видео: {name_info.get('common') or external_title}",
                         'video',
                         self._detect_video_platform(video_url)
                     )
                 )
                 external_link_id = self.cur.fetchone()[0]
                 
+                # Связываем external_link с entity_identifier
                 self.cur.execute(
                     "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
                     "VALUES (%s, %s, %s, %s, %s)",
@@ -1265,47 +1246,7 @@ class NewResourceImporter:
         except Exception as e:
             print(f"Error creating geographical text content: {e}")
             return None
-    def get_text_for_embedding(self, resource):
-        """Собирает текст для генерации эмбеддинга из всех доступных полей"""
-        title = self.get_title(resource)
-        structured_data = resource.get('structured_data')
-        content = resource.get('content', '')
         
-        text_parts = []
-        
-        # Всегда добавляем заголовок
-        if title:
-            text_parts.append(title)
-        
-        # Обрабатываем structured_data - извлекаем все текстовые значения
-        if structured_data:
-            # Рекурсивно собираем все строковые значения из structured_data
-            def extract_text_values(data):
-                if isinstance(data, dict):
-                    return ' '.join(extract_text_values(value) for value in data.values())
-                elif isinstance(data, list):
-                    return ' '.join(extract_text_values(item) for item in data)
-                elif isinstance(data, str):
-                    return data
-                else:
-                    return ''
-            
-            structured_text = extract_text_values(structured_data).strip()
-            if structured_text:
-                text_parts.append(structured_text)
-        
-        # Добавляем обычный контент, если нет structured_data
-        elif content:
-            text_parts.append(content)
-        
-        # Объединяем все части
-        combined_text = ' '.join(text_parts).strip()
-        
-        # Логируем для отладки (можно убрать в продакшене)
-        print(f"Text for embedding: {combined_text[:200]}...")
-        
-        return combined_text
-
     def process_text(self, resource):
         """Обработка текстовых ресурсов с генерацией эмбеддингов и structured_data"""
         try:
@@ -1339,7 +1280,14 @@ class NewResourceImporter:
             print(f"Has structured_data: {structured_data is not None}")
             print(f"in_stoplist: {in_stoplist_value}")
             
-            combined_text = self.get_text_for_embedding(resource)
+            # Генерируем эмбеддинг только из заголовка, если есть structured_data
+            # Или из комбинации заголовка и контента, если structured_data нет
+            if structured_data:
+                combined_text = title  # Используем только заголовок
+            else:
+                content = resource.get('content', '')
+                combined_text = f"{title} {content}" if title else content
+            
             embedding = self.generate_embedding(combined_text)
             
             # Обрабатываем structured_data с проверкой ошибок

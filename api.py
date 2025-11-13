@@ -1152,6 +1152,64 @@ def get_object_description():
         
         return None
 
+    # НОВАЯ ФУНКЦИЯ: Правильное формирование заголовка
+    def get_proper_title(desc, fallback_name=None, index=1):
+        """
+        Формирует корректный заголовок в порядке приоритета:
+        1. object_name из БД
+        2. title из feature_data
+        3. Первая строка content (как крайний вариант)
+        4. Заголовок по умолчанию
+        """
+        if not isinstance(desc, dict):
+            return f"Описание {index}"
+        
+        # 1. Приоритет: object_name из базы данных
+        title = desc.get("object_name")
+        if title and title.strip():
+            return title.strip()
+        
+        # 2. Заголовок из feature_data
+        feature_data = desc.get("feature_data", {})
+        if isinstance(feature_data, dict):
+            title = feature_data.get("title")
+            if title and title.strip():
+                return title.strip()
+        
+        # 3. Заголовок из structured_data
+        structured_data = desc.get("structured_data", {})
+        if isinstance(structured_data, dict):
+            # Проверяем различные возможные пути в structured_data
+            metadata = structured_data.get("metadata", {})
+            if isinstance(metadata, dict):
+                meta_info = metadata.get("meta_info", {})
+                if isinstance(meta_info, dict):
+                    title = meta_info.get("title")
+                    if title and title.strip():
+                        return title.strip()
+            
+            # Проверяем корневые поля structured_data
+            title = structured_data.get("title")
+            if title and title.strip():
+                return title.strip()
+        
+        # 4. Первая строка content (как крайний вариант)
+        content = desc.get("content", "")
+        if content and isinstance(content, str):
+            lines = content.strip().split('\n')
+            if lines and lines[0].strip():
+                first_line = lines[0].strip()
+                # Обрезаем слишком длинные строки
+                if len(first_line) > 100:
+                    return first_line[:97] + "..."
+                return first_line
+        
+        # 5. Заголовок по умолчанию с использованием имени объекта
+        if fallback_name and fallback_name.strip():
+            return f"{fallback_name} - описание {index}"
+        
+        return f"Описание {index}"
+
     try:
         # Определяем лимиты для разных случаев
         search_limit = limit if limit > 0 else 100
@@ -1253,7 +1311,9 @@ def get_object_description():
                         "index": i,
                         "keys": list(desc.keys()),
                         "has_feature_data": 'feature_data' in desc,
-                        "has_structured_data": 'structured_data' in desc
+                        "has_structured_data": 'structured_data' in desc,
+                        "object_name": desc.get("object_name"),
+                        "calculated_title": get_proper_title(desc, object_name, i+1)
                     }
                     if 'feature_data' in desc and isinstance(desc['feature_data'], dict):
                         sample_structure["feature_data_keys"] = list(desc['feature_data'].keys())
@@ -1441,7 +1501,7 @@ def get_object_description():
                 if is_blacklist:
                     logger.info("🚫 GigaChat вернул blacklist, возвращаем форматированные безопасные описания")
                     
-                    # Форматируем безопасные описания
+                    # Форматируем безопасные описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
                     formatted_descriptions = []
                     for i, desc in enumerate(descriptions_for_context, 1):
                         if isinstance(desc, dict):
@@ -1452,8 +1512,12 @@ def get_object_description():
                             # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
                             external_id = extract_external_id(desc)
                             
+                            # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
+                            title = get_proper_title(desc, object_name, i)
+                            
                             formatted_desc = {
                                 "id": i,
+                                "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
                                 "content": content,
                                 "source": source,
                                 "feature_data": desc.get("feature_data", {}),
@@ -1467,17 +1531,11 @@ def get_object_description():
                             if similarity is not None:
                                 formatted_desc["similarity"] = round(similarity, 4)
                                 
-                            lines = content.strip().split('\n')
-                            if lines and lines[0].strip():
-                                formatted_desc["title"] = lines[0].strip()
-                            else:
-                                formatted_desc["title"] = f"Описание {i}"
-                                
                             formatted_descriptions.append(formatted_desc)
                         else:
                             formatted_descriptions.append({
                                 "id": i,
-                                "title": f"Описание {i}",
+                                "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
                                 "content": desc,
                                 "source": "content"
                             })
@@ -1541,7 +1599,11 @@ def get_object_description():
                         # ИЗВЛЕКАЕМ EXTERNAL_ID
                         external_id = extract_external_id(desc)
                         
+                        # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
+                        title = get_proper_title(desc, object_name, len(source_descriptions_summary) + 1)
+                        
                         desc_summary = {
+                            "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
                             "content_preview": desc.get("content", "")[:200] + "..." if len(desc.get("content", "")) > 200 else desc.get("content", ""),
                             "source": desc.get("source", "unknown"),
                             "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
@@ -1625,7 +1687,7 @@ def get_object_description():
                 response["debug"] = debug_info
             return jsonify(response), 404
 
-        # Форматируем описания
+        # Форматируем описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
         formatted_descriptions = []
         for i, desc in enumerate(descriptions, 1):
             if isinstance(desc, dict):
@@ -1636,8 +1698,12 @@ def get_object_description():
                 # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
                 external_id = extract_external_id(desc)
                 
+                # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
+                title = get_proper_title(desc, object_name, i)
+                
                 formatted_desc = {
                     "id": i,
+                    "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
                     "content": content,
                     "source": source,
                     "feature_data": desc.get("feature_data", {}),
@@ -1651,17 +1717,11 @@ def get_object_description():
                 if similarity is not None:
                     formatted_desc["similarity"] = round(similarity, 4)
                     
-                lines = content.strip().split('\n')
-                if lines and lines[0].strip():
-                    formatted_desc["title"] = lines[0].strip()[:100]
-                else:
-                    formatted_desc["title"] = f"Описание {i}"
-                    
                 formatted_descriptions.append(formatted_desc)
             else:
                 formatted_descriptions.append({
                     "id": i,
-                    "title": f"Описание {i}",
+                    "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
                     "content": desc,
                     "source": "content"
                 })
