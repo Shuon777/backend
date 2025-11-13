@@ -50,7 +50,16 @@ class NewResourceImporter:
         self.species_synonyms_path = self._get_species_synonyms_path()
         self.species_synonyms = self.load_species_synonyms() or {}
         self.embedding_model = self.load_embedding_model()
-    
+    def safe_convert_in_stoplist(self, value):
+        """Безопасно преобразует in_stoplist в число"""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return 1 if value else 0
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return 1  # значение по умолчанию
     def load_embedding_model(self):
         """Загрузка модели для генерации эмбеддингов"""
         try:
@@ -1029,7 +1038,7 @@ class NewResourceImporter:
             coordinates = resource.get('coordinates', {})
             
             # ФИКС: Сохраняем in_stoplist как число
-            in_stoplist_value = resource.get('in_stoplist')
+            in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
             # Создаем базовый feature_data с in_stoplist
             feature_data = {
@@ -1246,7 +1255,46 @@ class NewResourceImporter:
         except Exception as e:
             print(f"Error creating geographical text content: {e}")
             return None
-        
+    def get_text_for_embedding(self, resource):
+            """Собирает текст для генерации эмбеддинга из всех доступных полей"""
+            title = self.get_title(resource)
+            structured_data = resource.get('structured_data')
+            content = resource.get('content', '')
+            
+            text_parts = []
+            
+            # Всегда добавляем заголовок
+            if title:
+                text_parts.append(title)
+            
+            # Обрабатываем structured_data - извлекаем все текстовые значения
+            if structured_data:
+                # Рекурсивно собираем все строковые значения из structured_data
+                def extract_text_values(data):
+                    if isinstance(data, dict):
+                        return ' '.join(extract_text_values(value) for value in data.values())
+                    elif isinstance(data, list):
+                        return ' '.join(extract_text_values(item) for item in data)
+                    elif isinstance(data, str):
+                        return data
+                    else:
+                        return ''
+                
+                structured_text = extract_text_values(structured_data).strip()
+                if structured_text:
+                    text_parts.append(structured_text)
+            
+            # Добавляем обычный контент, если нет structured_data
+            elif content:
+                text_parts.append(content)
+            
+            # Объединяем все части
+            combined_text = ' '.join(text_parts).strip()
+            
+            # Логируем для отладки (можно убрать в продакшене)
+            print(f"Text for embedding: {combined_text[:200]}...")
+            
+            return combined_text        
     def process_text(self, resource):
         """Обработка текстовых ресурсов с генерацией эмбеддингов и structured_data"""
         try:
@@ -1258,7 +1306,7 @@ class NewResourceImporter:
             structured_data = resource.get('structured_data')
             
             # ФИКС: Сохраняем in_stoplist как число
-            in_stoplist_value = resource.get('in_stoplist')
+            in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
             # Собираем feature_data для текстового контента
             feature_data = {
@@ -1280,14 +1328,7 @@ class NewResourceImporter:
             print(f"Has structured_data: {structured_data is not None}")
             print(f"in_stoplist: {in_stoplist_value}")
             
-            # Генерируем эмбеддинг только из заголовка, если есть structured_data
-            # Или из комбинации заголовка и контента, если structured_data нет
-            if structured_data:
-                combined_text = title  # Используем только заголовок
-            else:
-                content = resource.get('content', '')
-                combined_text = f"{title} {content}" if title else content
-            
+            combined_text = self.get_text_for_embedding(resource)
             embedding = self.generate_embedding(combined_text)
             
             # Обрабатываем structured_data с проверкой ошибок
@@ -1407,7 +1448,7 @@ class NewResourceImporter:
             title = self.get_title(resource)
             
             # ФИКС: Сохраняем in_stoplist как число
-            in_stoplist_value = resource.get('in_stoplist')
+            in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
             # Добавляем in_stoplist в feature_data изображения
             image_feature_data = feature_photo.copy() if feature_photo else {}
@@ -1667,7 +1708,7 @@ class NewResourceImporter:
         
         feature_data_dict = {}
         if in_stoplist_value is not None:
-            feature_data_dict['in_stoplist'] = in_stoplist_value
+            feature_data_dict['in_stoplist'] = self.safe_convert_in_stoplist(in_stoplist_value)
         if feature_data:
             # Сохраняем оригинальные поля
             feature_data_dict.update({
