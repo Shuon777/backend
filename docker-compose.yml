@@ -1,19 +1,38 @@
-services:
-  redis:
-    image: redis:alpine
-    network_mode: "host"
+# docker-compose.yml
 
+version: '3.8'
+
+services:
+  # 1. Бэкенд-сервис (ваше Flask API)
   backend:
-    build: 
-      context: .
-      network: host
-    network_mode: "host"
-    ports:
-      - "5555:5555"
+    build: . # Собираем образ из текущей директории (используя Dockerfile)
+    container_name: ecobot_backend_api
     env_file:
-      - .env
+      - .env # Подключаем файл с переменными окружения
+    ports:
+      # Пробрасываем порт 5555 из контейнера на порт 5555 хост-машины
+      - "5555:5555"
     volumes:
-      - .:/app
-      - /var/www/map_bot/maps:/var/www/map_bot/maps
+      # Монтируем папку с картами с хоста в папку /app/maps внутри контейнера
+      - ./maps:/app/maps
+      # Монтируем папку для логов
+      - ./logs:/app/logs
+      # Монтируем папку с JSON-файлами
+      - ./json_files:/app/json_files
     depends_on:
-      - redis
+      - redis # Запускать только после того, как запустится Redis
+
+  # 2. Сервис Redis
+  redis:
+    image: "redis:7-alpine"
+    container_name: ecobot_redis
+    volumes:
+      # Используем именованный том для сохранения данных Redis между перезапусками
+      - redis_data:/data
+    ports:
+      # Пробрасываем порт Redis наружу для отладки (можно убрать в production)
+      - "6379:6379"
+
+# Определяем именованный том для данных Redis
+volumes:
+  redis_data:

@@ -13,7 +13,10 @@ def get_model_dimension(model_name):
 
 class EmbeddingConfig:
     def __init__(self):
-        self.BASE_MODELS_DIR = "embedding_models"
+        # ИСПРАВЛЕНО: используем абсолютный путь
+        current_dir = Path(__file__).parent
+        self.BASE_MODELS_DIR = str(current_dir.parent / "embedding_models")  # Поднимаемся на уровень выше
+        
         self.CONFIG_FILE = os.path.join(self.BASE_MODELS_DIR, "active_model.json")
         
         os.makedirs(self.BASE_MODELS_DIR, exist_ok=True)
@@ -29,6 +32,12 @@ class EmbeddingConfig:
         
         self.current_model = self._load_active_model()
         self.current_model_path = self.get_model_path(self.current_model)
+        
+        # Добавим отладочную информацию
+        print(f"📁 Базовая директория моделей: {self.BASE_MODELS_DIR}")
+        print(f"🎯 Активная модель: {self.current_model}")
+        print(f"📁 Путь к модели: {self.current_model_path}")
+        print(f"📏 Размерность: {get_model_dimension(self.current_model)}")
     
     def _load_active_model(self):
         """Загружает активную модель из файла конфигурации"""

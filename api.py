@@ -40,8 +40,8 @@ geo = GeoProcessor(maps_dir=MAPS_DIR, domain=DOMAIN)
 slot_val = Slot_validator()
 init_redis(host='localhost', port=6379, db=1, decode_responses=True)
 
-current_model, current_model_path = embedding_config.get_active_model()
-embedding_model_path = current_model_path
+current_dir = Path(__file__).parent
+embedding_model_path = str(current_dir / "embedding_models" / "BERTA")
 
 species_synonyms_path = os.getenv("SPECIES_SYNONYMS_PATH", 
                                  str(Path(__file__).parent / "json_files" / "species_synonyms.json"))
@@ -1061,7 +1061,7 @@ def get_object_description():
     object_name = request.args.get("object_name")
     query = request.args.get("query")
     limit = int(request.args.get("limit", 0))
-    similarity_threshold = float(request.args.get("similarity_threshold", 0.01))
+    similarity_threshold = float(request.args.get("similarity_threshold", 0.35))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     use_gigachat_answer = request.args.get("use_gigachat_answer", "false").lower() == "true"
@@ -1780,7 +1780,7 @@ def get_species_description():
     species_name = request.args.get("species_name")
     query = request.args.get("query")
     limit = int(request.args.get("limit", 5))
-    similarity_threshold = float(request.args.get("similarity_threshold", 0.5))
+    similarity_threshold = float(request.args.get("similarity_threshold", 0.1))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
@@ -1828,6 +1828,14 @@ def get_species_description():
                     "first_5_elements": embedding[:5] if isinstance(embedding, list) else "N/A"
                 }
             
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ПЕРЕД ВЫЗОВОМ
+            logger.info(f"🔍 ВЫЗОВ get_text_descriptions_with_embedding:")
+            logger.info(f"   - species_name: {species_name}")
+            logger.info(f"   - query: {query}")
+            logger.info(f"   - similarity_threshold: {similarity_threshold}")
+            logger.info(f"   - in_stoplist: {in_stoplist}")
+            logger.info(f"   - limit: {limit}")
+            
             # ИСПРАВЛЕНИЕ: Используем relational_service вместо search_service
             descriptions = search_service.relational_service.get_text_descriptions_with_embedding(
                 species_name=species_name,
@@ -1836,6 +1844,23 @@ def get_species_description():
                 similarity_threshold=similarity_threshold,
                 in_stoplist=in_stoplist
             )
+            
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ РЕЗУЛЬТАТОВ
+            logger.info(f"📊 РЕЗУЛЬТАТЫ get_text_descriptions_with_embedding:")
+            logger.info(f"   - Найдено описаний: {len(descriptions)}")
+            
+            for i, desc in enumerate(descriptions):
+                if isinstance(desc, dict):
+                    logger.info(f"   - Описание {i}:")
+                    logger.info(f"     * similarity: {desc.get('similarity')}")
+                    logger.info(f"     * has_content: {bool(desc.get('content'))}")
+                    logger.info(f"     * content_length: {len(desc.get('content', ''))}")
+                    logger.info(f"     * has_structured_data: {bool(desc.get('structured_data'))}")
+                    logger.info(f"     * source: {desc.get('source')}")
+                    if desc.get('structured_data'):
+                        logger.info(f"     * structured_data_keys: {list(desc.get('structured_data', {}).keys())}")
+                else:
+                    logger.info(f"   - Описание {i}: тип {type(desc)}")
             
             # Debug информация о результатах поиска
             if debug_mode:
@@ -1860,6 +1885,9 @@ def get_species_description():
         safe_descriptions = []
         stoplisted_descriptions = []
         
+        logger.info(f"🔒 ФИЛЬТРАЦИЯ ПО STOPLIST (уровень {in_stoplist}):")
+        logger.info(f"   - Всего описаний до фильтрации: {len(descriptions)}")
+        
         for desc in descriptions:
             # Проверяем feature_data на наличие in_stoplist
             if isinstance(desc, dict):
@@ -1871,19 +1899,22 @@ def get_species_description():
                     requested_level = int(in_stoplist)
                     if desc_in_stoplist is None or int(desc_in_stoplist) <= requested_level:
                         safe_descriptions.append(desc)
+                        logger.info(f"   ✓ БЕЗОПАСНО: in_stoplist={desc_in_stoplist}")
                     else:
                         stoplisted_descriptions.append(desc)
-                        logger.info(f"Исключен документ с in_stoplist={desc_in_stoplist} (запрошен уровень {requested_level}): {species_name}")
+                        logger.info(f"   ✗ STOPLIST: in_stoplist={desc_in_stoplist} > запрошенного {requested_level}")
                 except (ValueError, TypeError):
                     # Если ошибка преобразования, используем уровень по умолчанию (1)
                     if desc_in_stoplist is None or int(desc_in_stoplist) <= 1:
                         safe_descriptions.append(desc)
+                        logger.info(f"   ✓ БЕЗОПАСНО (по умолчанию): in_stoplist={desc_in_stoplist}")
                     else:
                         stoplisted_descriptions.append(desc)
-                        logger.info(f"Исключен документ с in_stoplist={desc_in_stoplist}: {species_name}")
+                        logger.info(f"   ✗ STOPLIST (по умолчанию): in_stoplist={desc_in_stoplist}")
             else:
                 # Для простых строк считаем безопасными
                 safe_descriptions.append(desc)
+                logger.info(f"   ✓ БЕЗОПАСНО: простое описание")
 
         # Debug информация о фильтрации in_stoplist
         if debug_mode:
@@ -1894,8 +1925,13 @@ def get_species_description():
                 "requested_level": in_stoplist
             }
 
+        logger.info(f"📋 ИТОГИ ФИЛЬТРАЦИИ:")
+        logger.info(f"   - Безопасные описания: {len(safe_descriptions)}")
+        logger.info(f"   - Исключено по stoplist: {len(stoplisted_descriptions)}")
+
         # Если после фильтрации не осталось безопасных документов
         if not safe_descriptions:
+            logger.warning(f"🚫 НЕТ БЕЗОПАСНЫХ ОПИСАНИЙ для '{species_name}'")
             response = {
                 "error": "Я не готов про это разговаривать",
                 "used_objects": [],
@@ -1962,6 +1998,7 @@ def get_species_description():
             descriptions = filtered_descriptions
 
         if not descriptions:
+            logger.warning(f"🚫 ОПИСАНИЯ ОТФИЛЬТРОВАНЫ GigaChat для '{species_name}'")
             response = {
                 "error": "Я не готов про это разговаривать",
                 "used_objects": [],
@@ -2006,6 +2043,7 @@ def get_species_description():
         if debug_mode:
             response_data["debug"] = debug_info
 
+        logger.info(f"✅ УСПЕШНЫЙ ОТВЕТ для '{species_name}': {len(descriptions)} описаний")
         return jsonify(response_data)
         
     except Exception as e:
@@ -2019,7 +2057,7 @@ def get_species_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-
+    
 @app.route("/get_coords", methods=["POST"])
 def api_get_coords():
     data = request.get_json()

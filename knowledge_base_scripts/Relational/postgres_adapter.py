@@ -34,7 +34,11 @@ class NewResourceImporter:
         else:
             self.embedding_dimension = get_model_dimension(current_model)
             
-        self.embedding_model_path = embedding_config.get_model_path(current_model)
+        current_dir = Path(__file__).parent
+        base_dir = current_dir.parent.parent
+        embedding_models_dir = base_dir / "embedding_models" / "BERTA"
+        
+        self.embedding_model_path = str(embedding_models_dir)
         
         print(f"📏 Размерность эмбеддингов: {self.embedding_dimension}")
         print(f"🎯 Активная модель: {current_model}")
@@ -68,26 +72,45 @@ class NewResourceImporter:
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': False}
             )
+            
+            # Проверяем, что модель работает
+            test_embedding = embeddings.embed_query("test")
+            if test_embedding is None or len(test_embedding) == 0:
+                raise Exception("Model loaded but returned empty embedding")
+                
+            print(f"✅ Модель эмбеддингов успешно загружена, размерность: {len(test_embedding)}")
             return embeddings
+            
         except Exception as e:
-            print(f"Error loading embedding model: {e}")
+            print(f"❌ Error loading embedding model: {e}")
             return None
 
     def generate_embedding(self, text):
         """Генерация эмбеддинга для текста"""
-        if not text or not self.embedding_model:
+        if not text:
+            print("⚠️  Пустой текст для эмбеддинга")
+            return None
+        
+        if not self.embedding_model:
+            print("❌ Модель эмбеддингов не загружена")
             return None
         
         try:
             combined_text = text
             embedding = self.embedding_model.embed_query(combined_text)
             
+            if embedding is None:
+                print("❌ Модель вернула None")
+                return None
+                
             if len(embedding) != self.embedding_dimension:
                 print(f"⚠️  Предупреждение: Размерность эмбеддинга ({len(embedding)}) не совпадает с ожидаемой ({self.embedding_dimension})")
             
+            print(f"✅ Сгенерирован эмбеддинг размерности {len(embedding)}")
             return embedding
+            
         except Exception as e:
-            print(f"Error generating embedding: {e}")
+            print(f"❌ Error generating embedding: {e}")
             return None
         
     def load_geodb(self):
@@ -1329,7 +1352,14 @@ class NewResourceImporter:
             print(f"in_stoplist: {in_stoplist_value}")
             
             combined_text = self.get_text_for_embedding(resource)
+            print(f"📝 Текст для эмбеддинга: {combined_text[:100]}...")
+            
             embedding = self.generate_embedding(combined_text)
+            
+            if embedding is None:
+                print("❌ Не удалось сгенерировать эмбеддинг")
+            else:
+                print(f"✅ Эмбеддинг сгенерирован, размер: {len(embedding)}")
             
             # Обрабатываем structured_data с проверкой ошибок
             structured_data_json = None

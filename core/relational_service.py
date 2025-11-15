@@ -918,7 +918,12 @@ class RelationalService:
         WHERE be.common_name_ru ILIKE %s
         AND 1 - (tc.embedding <=> %s::vector) > %s
         """
-        
+        logger.info(f"🔍 ВЫПОЛНЯЕТСЯ ВЕКТОРНЫЙ ПОИСК:")
+        logger.info(f"   - species_name: {species_name}")
+        logger.info(f"   - similarity_threshold: {similarity_threshold}")
+        logger.info(f"   - in_stoplist: {in_stoplist}")
+        logger.info(f"   - limit: {limit}")
+        logger.info(f"   - Длина embedding: {len(query_embedding)}")
         # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
@@ -953,10 +958,16 @@ class RelationalService:
                     similarity = row.get('similarity')
                     feature_data = row.get('feature_data', {})
                     
-                    # Если content пустой, извлекаем из structured_data
+                    # ПРИНУДИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ КОНТЕНТА
                     final_content = content
                     if not final_content and structured_data:
                         final_content = self._extract_content_from_structured_data(structured_data)
+                        logger.info(f"📝 ИЗВЛЕЧЕН КОНТЕНТ ИЗ structured_data: {len(final_content)} символов")
+                    
+                    # Если все еще нет контента, создаем заглушку
+                    if not final_content:
+                        final_content = f"Описание вида {species_name}"
+                        logger.warning(f"⚠️  КОНТЕНТ ОТСУТСТВУЕТ, создана заглушка")
                     
                     if final_content and similarity is not None:
                         item = {
@@ -972,6 +983,9 @@ class RelationalService:
                 except Exception as e:
                     logger.error(f"Error processing row: {str(e)}")
                     continue
+            logger.info(f"📊 РЕЗУЛЬТАТЫ ВЕКТОРНОГО ПОИСКА:")
+            logger.info(f"   - Найдено строк в БД: {len(results)}")
+            logger.info(f"   - После обработки: {len(formatted_results)}")
             
             return formatted_results
             
