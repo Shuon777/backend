@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -1952,11 +1953,20 @@ def get_species_description():
 
         # В этом эндпоинте used_objects содержит информацию о виде
         for desc in descriptions:
+            similarity = None
+            if isinstance(desc, dict) and desc.get("similarity") is not None:
+                try:
+                    similarity_val = desc.get("similarity")
+                    # ФИКС: Проверяем, что similarity валидно и не NaN
+                    if similarity_val is not None and not math.isnan(float(similarity_val)):
+                        similarity = round(float(similarity_val), 4)
+                except (ValueError, TypeError):
+                    similarity = None
             used_objects.append({
                 "name": species_name,
                 "type": "biological_entity",
                 "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
-                "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None
+                "similarity": similarity
             })
 
         if use_gigachat_filter:
@@ -2155,6 +2165,22 @@ def api_coords_to_map():
             response["debug"] = debug_info
         return jsonify(response), 400
 
+    # РАЗРЕШЕНИЕ СИНОНИМОВ ДЛЯ ВИДОВ
+    resolved_species_info = None
+    if species_name:
+        resolved_species_info = search_service.resolve_object_synonym(species_name, "biological_entity")
+        
+        debug_info["species_resolution"] = {
+            "original_name": species_name,
+            "resolved_info": resolved_species_info
+        }
+        
+        if resolved_species_info.get("resolved", False):
+            species_name = resolved_species_info["main_form"]
+            logger.info(f"✅ Разрешен синоним вида: '{resolved_species_info['original_name']}' -> '{species_name}'")
+        else:
+            logger.info(f"ℹ️ Синоним для вида '{species_name}' не найден, используем оригинальное название")
+
     # Initialize t3 in case visualization fails
     t3 = time.perf_counter()
     
@@ -2184,6 +2210,14 @@ def api_coords_to_map():
         }
         debug_info["objects_count"] = len(objects)
         debug_info["search_query_details"] = result.get("debug_info", {})
+        
+        # Добавляем информацию о разрешении синонимов в debug
+        if resolved_species_info:
+            debug_info["species_synonym_resolution"] = {
+                "original_name": resolved_species_info.get("original_name"),
+                "resolved_name": species_name,
+                "resolved": resolved_species_info.get("resolved", False)
+            }
         
         if not objects:
             response = {
@@ -2367,6 +2401,14 @@ def api_coords_to_map():
             map_result["in_stoplist_filter_applied"] = True
             map_result["in_stoplist_level"] = in_stoplist
             map_result["stoplisted_count"] = len(stoplisted_objects)
+            
+            # Добавляем информацию о разрешении синонимов в ответ
+            if resolved_species_info and resolved_species_info.get("resolved", False):
+                map_result["species_synonym_resolution"] = {
+                    "original_name": resolved_species_info["original_name"],
+                    "resolved_name": species_name,
+                    "resolved": True
+                }
             
             # Добавляем debug информацию
             debug_info["render_time"] = round(t3 - t2, 3)
