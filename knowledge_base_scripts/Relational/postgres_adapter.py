@@ -1317,7 +1317,8 @@ class NewResourceImporter:
             # Логируем для отладки (можно убрать в продакшене)
             print(f"Text for embedding: {combined_text[:200]}...")
             
-            return combined_text        
+            return combined_text       
+         
     def process_text(self, resource):
         """Обработка текстовых ресурсов с генерацией эмбеддингов и structured_data"""
         try:
@@ -1424,7 +1425,9 @@ class NewResourceImporter:
                         information_subtype = resource.get('information_subtype')
                         feature_data = resource.get('feature_data', {})
                         
-                        # Создаем новую биологическую сущность
+                        # УЛУЧШЕНИЕ: более точное определение типа
+                        biological_type = information_subtype or self.determine_biological_type(feature_data)
+                        
                         self.cur.execute(
                             "INSERT INTO biological_entity (common_name_ru, scientific_name, description, type, feature_data) "
                             "VALUES (%s, %s, %s, %s, %s) RETURNING id",
@@ -1432,31 +1435,16 @@ class NewResourceImporter:
                                 common_name, 
                                 scientific_name, 
                                 f"Автоматически создано из текста: {title}",
-                                information_subtype or self.determine_biological_type(feature_data),  # ОПРЕДЕЛЯЕМ ТИП
+                                biological_type,  # Используем определенный тип
                                 Json({
                                     'in_stoplist': in_stoplist_value,
                                     'information_subtype': information_subtype,
                                     'flora_type': feature_data.get('flora_type'),
-                                    'fauna_type': feature_data.get('fauna_type')
+                                    'fauna_type': feature_data.get('fauna_type'),
+                                    'structured_data': resource.get('structured_data')  # Сохраняем структурированные данные
                                 })
                             )
                         )
-                        bio_id = self.cur.fetchone()[0]
-                        
-                        # Обновляем кэш
-                        if common_name:
-                            self.bio_entity_cache[common_name] = bio_id
-                        if scientific_name:
-                            self.bio_entity_cache[scientific_name] = bio_id
-                        
-                        self.add_reliability('biological_entity', bio_id, name_info.get('source'))
-                    
-                    # Создаем связь
-                    self.cur.execute(
-                        "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
-                        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                        (text_id, entity_type, bio_id, 'biological_entity', 'описание объекта')
-                    )
             
             print(f"Successfully processed text ID: {text_id}, in_stoplist: {in_stoplist_value}")
             return text_id
@@ -1586,8 +1574,15 @@ class NewResourceImporter:
         return name.strip().lower()
 
     def _get_biological_name_from_map(self, resource):
-        """Получает название биологической сущности для карт с приоритетом plant_russian_name"""
-        # Приоритет 1: plant_russian_name (если есть и валидно)
+        """Получает название биологической сущности для карт с приоритетом animal_russian_name/plant_russian_name"""
+        
+        # ПРИОРИТЕТ ДЛЯ ФАУНЫ
+        if resource.get('information_subtype') == "Объект фауны":
+            animal_russian_name = resource.get('animal_russian_name')
+            if animal_russian_name and animal_russian_name.strip():
+                return animal_russian_name.strip()
+        
+        # ПРИОРИТЕТ ДЛЯ ФЛОРЫ  
         plant_russian_name = resource.get('plant_russian_name')
         if plant_russian_name and plant_russian_name.strip():
             return plant_russian_name.strip()
@@ -1634,18 +1629,26 @@ class NewResourceImporter:
         name_info = identificator.get('name', {})
         geo_synonyms = resource.get('geo_synonyms', [])
         
-        common_name = self._get_biological_name_from_map(resource)
+        # ДОБАВИТЬ: поддержку animal_russian_name для фауны
+        if resource.get('information_subtype') == "Объект фауны":
+            common_name = resource.get('animal_russian_name') or self._get_biological_name_from_map(resource)
+            scientific_name = resource.get('animal_latin_name')
+        else:
+            common_name = self._get_biological_name_from_map(resource)
+            scientific_name = resource.get('plant_latin_name')
         
         information_subtype = resource.get('information_subtype')
         feature_data = resource.get('feature_data', {})
+        
         bio_id = self._process_biological_entity(
             common_name,
-            resource.get('plant_latin_name'),
+            scientific_name,
             name_info.get('source'),
             resource.get('in_stoplist', False),
             information_subtype,
             feature_data
         )
+        
 
         # Обрабатываем все географические объекты
         for geo_name in geo_synonyms:
