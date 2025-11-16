@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import numpy as np
+import argparse  # Добавляем модуль для парсинга аргументов командной строки
+
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -17,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from embedding_config import embedding_config, get_model_dimension
 
 class NewResourceImporter:
-    def __init__(self):
+    def __init__(self, use_embedding_stubs=False):
+        self.use_embedding_stubs = use_embedding_stubs  # Флаг для использования заглушек
         self.db_config = {
             "dbname": os.getenv("DB_NAME", "eco"),
             "user": os.getenv("DB_USER", "postgres"),
@@ -43,6 +46,7 @@ class NewResourceImporter:
         print(f"📏 Размерность эмбеддингов: {self.embedding_dimension}")
         print(f"🎯 Активная модель: {current_model}")
         print(f"📁 Путь к модели: {self.embedding_model_path}")
+        print(f"🔧 Режим заглушек эмбеддингов: {'ВКЛЮЧЕН' if self.use_embedding_stubs else 'ВЫКЛЮЧЕН'}")
         
         
         self.conn = None
@@ -53,7 +57,14 @@ class NewResourceImporter:
         self.geodb_data = self.load_geodb()
         self.species_synonyms_path = self._get_species_synonyms_path()
         self.species_synonyms = self.load_species_synonyms() or {}
-        self.embedding_model = self.load_embedding_model()
+        
+        # Загружаем модель только если не используем заглушки
+        if not self.use_embedding_stubs:
+            self.embedding_model = self.load_embedding_model()
+        else:
+            self.embedding_model = None
+            print("🚫 Модель эмбеддингов не загружена (режим заглушек)")
+
     def safe_convert_in_stoplist(self, value):
         """Безопасно преобразует in_stoplist в число"""
         if value is None:
@@ -64,8 +75,13 @@ class NewResourceImporter:
             return int(value)
         except (ValueError, TypeError):
             return 1  # значение по умолчанию
+
     def load_embedding_model(self):
-        """Загрузка модели для генерации эмбеддингов"""
+        """Загрузка модели для генерации эмбеддингов (только если не используем заглушки)"""
+        if self.use_embedding_stubs:
+            print("🔧 Пропущена загрузка модели (режим заглушек)")
+            return None
+            
         try:
             embeddings = HuggingFaceEmbeddings(
                 model_name=self.embedding_model_path,
@@ -86,7 +102,14 @@ class NewResourceImporter:
             return None
 
     def generate_embedding(self, text):
-        """Генерация эмбеддинга для текста"""
+        """Генерация эмбеддинга для текста или возврат заглушки"""
+        if self.use_embedding_stubs:
+            # Возвращаем заглушку - нулевой вектор нужной размерности
+            stub_embedding = [0.0] * self.embedding_dimension
+            print(f"🔧 Использован заглушечный эмбеддинг размерности {len(stub_embedding)}")
+            return stub_embedding
+        
+        # Оригинальная логика генерации эмбеддингов
         if not text:
             print("⚠️  Пустой текст для эмбеддинга")
             return None
@@ -607,11 +630,18 @@ class NewResourceImporter:
                         (biological_type, bio_id)
                     )
             
+                    relation_type_map = {
+                'image_content': 'изображение объекта',
+                'text_content': 'описание объекта'
+            }
+            
+            relation_type = relation_type_map.get(source_type, 'связан с')
+            
             self.cur.execute(
                 "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
                 "VALUES (%s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
-                (source_id, source_type, bio_id, 'biological_entity', 'изображение объекта')
+                (source_id, source_type, bio_id, 'biological_entity', relation_type)
             )
             
             return bio_id
@@ -1221,7 +1251,7 @@ class NewResourceImporter:
             return None
 
     def _create_geographical_text_content(self, name, description, geo_type, coordinates, source, meta_info=None):
-        """Создает текстовое описание для географического объекта с эмбеддингом и meta_info"""
+        """Создает текстовое описание для географического объекта с эмбеддингом или заглушкой"""
         try:
             # Формируем структурированные данные
             structured_data = {
@@ -1234,11 +1264,12 @@ class NewResourceImporter:
                 "metadata": {
                     "source": source,
                     "import_timestamp": datetime.now().isoformat(),
-                    "meta_info": meta_info or {}  # Добавляем meta_info
+                    "meta_info": meta_info or {},
+                    "embedding_mode": "stub" if self.use_embedding_stubs else "real"  # Добавляем информацию о режиме
                 }
             }
             
-            # Генерируем эмбеддинг из названия и описания
+            # Генерируем эмбеддинг (реальный или заглушку)
             text_for_embedding = f"{name}. {description}"
             embedding = self.generate_embedding(text_for_embedding)
             
@@ -1272,12 +1303,14 @@ class NewResourceImporter:
                 (text_id, 'text_content', ident_id)
             )
             
-            print(f"Создано текстовое описание для географического объекта: {name} (id: {text_id})")
+            mode_info = " (заглушка)" if self.use_embedding_stubs else ""
+            print(f"Создано текстовое описание для географического объекта: {name} (id: {text_id}){mode_info}")
             return text_id
             
         except Exception as e:
             print(f"Error creating geographical text content: {e}")
             return None
+
     def get_text_for_embedding(self, resource):
             """Собирает текст для генерации эмбеддинга из всех доступных полей"""
             title = self.get_title(resource)
@@ -1360,7 +1393,8 @@ class NewResourceImporter:
             if embedding is None:
                 print("❌ Не удалось сгенерировать эмбеддинг")
             else:
-                print(f"✅ Эмбеддинг сгенерирован, размер: {len(embedding)}")
+                mode_info = " (заглушка)" if self.use_embedding_stubs else ""
+                print(f"✅ Эмбеддинг сгенерирован{mode_info}, размер: {len(embedding)}")
             
             # Обрабатываем structured_data с проверкой ошибок
             structured_data_json = None
@@ -1413,40 +1447,37 @@ class NewResourceImporter:
                 if geo_name:  # Проверяем, что имя не пустое
                     self.process_geo_mention(text_id, entity_type, geo_name, name_info)
             
-            # Обработка биологических сущностей
+            # Обработка биологических сущностей - ИСПРАВЛЕНИЕ ЗДЕСЬ
+            bio_id = None
             if resource.get('information_type') == "Объект флоры и фауны":
                 common_name = name_info.get('common')
                 scientific_name = name_info.get('scientific')
                 
                 if common_name or scientific_name:
-                    bio_id = self.find_biological_entity(common_name, scientific_name)
+                    information_subtype = resource.get('information_subtype')
+                    feature_data_for_bio = resource.get('feature_data', {})
                     
-                    if not bio_id:
-                        information_subtype = resource.get('information_subtype')
-                        feature_data = resource.get('feature_data', {})
-                        
-                        # УЛУЧШЕНИЕ: более точное определение типа
-                        biological_type = information_subtype or self.determine_biological_type(feature_data)
-                        
+                    # Используем process_biological_entity для создания/поиска биологической сущности
+                    bio_id = self.process_biological_entity(
+                        text_id,  # source_id
+                        'text_content',  # source_type
+                        name_info,
+                        {},  # classification (может быть пустым для текстов)
+                        feature_data_for_bio,
+                        information_subtype
+                    )
+                    
+                    # СОЗДАЕМ СВЯЗЬ МЕЖДУ ТЕКСТОМ И БИОЛОГИЧЕСКОЙ СУЩНОСТЬЮ
+                    if bio_id:
                         self.cur.execute(
-                            "INSERT INTO biological_entity (common_name_ru, scientific_name, description, type, feature_data) "
-                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                            (
-                                common_name, 
-                                scientific_name, 
-                                f"Автоматически создано из текста: {title}",
-                                biological_type,  # Используем определенный тип
-                                Json({
-                                    'in_stoplist': in_stoplist_value,
-                                    'information_subtype': information_subtype,
-                                    'flora_type': feature_data.get('flora_type'),
-                                    'fauna_type': feature_data.get('fauna_type'),
-                                    'structured_data': resource.get('structured_data')  # Сохраняем структурированные данные
-                                })
-                            )
+                            "INSERT INTO entity_relation (source_id, source_type, target_id, target_type, relation_type) "
+                            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                            (text_id, 'text_content', bio_id, 'biological_entity', 'текстовое описание')
                         )
+                        print(f"✅ Создана связь между текстом {text_id} и биологической сущностью {bio_id}")
             
-            print(f"Successfully processed text ID: {text_id}, in_stoplist: {in_stoplist_value}")
+            mode_info = " (заглушки эмбеддингов)" if self.use_embedding_stubs else ""
+            print(f"Successfully processed text ID: {text_id}, in_stoplist: {in_stoplist_value}{mode_info}")
             return text_id
             
         except Exception as e:
@@ -1843,7 +1874,8 @@ class NewResourceImporter:
                 self.author_cache = {}
                 self.bio_entity_cache = {}
 
-        print(f"\nImport completed. Success: {success_count}, Errors: {error_count}")
+        mode_info = " (режим заглушек эмбеддингов)" if self.use_embedding_stubs else ""
+        print(f"\nImport completed{mode_info}. Success: {success_count}, Errors: {error_count}")
             
     def run(self, json_file):
         try:
@@ -1857,12 +1889,25 @@ class NewResourceImporter:
             traceback.print_exc()
         finally:
             self.disconnect()
-            
-if __name__ == "__main__":
-    importer = NewResourceImporter()
+
+def main():
+    """Основная функция с парсингом аргументов командной строки"""
+    parser = argparse.ArgumentParser(description='Импорт ресурсов в базу данных')
+    parser.add_argument('--use-stubs', action='store_true', 
+                       help='Использовать заглушки для эмбеддингов вместо реальной генерации')
+    parser.add_argument('--json-file', default='../../json_files/resources_dist.json',
+                       help='Путь к JSON файлу с ресурсами')
+    
+    args = parser.parse_args()
+    
+    importer = NewResourceImporter(use_embedding_stubs=args.use_stubs)
     try:
         importer.connect()
-        importer.import_resources("../../json_files/resources_dist.json")
+        importer.import_resources(args.json_file)
         importer.save_missing_geometry_objects()
+        print("Импорт успешно завершен!")
     finally:
         importer.disconnect()
+
+if __name__ == "__main__":
+    main()

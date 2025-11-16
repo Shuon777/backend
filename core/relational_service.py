@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import logging
 from pathlib import Path
@@ -958,6 +959,20 @@ class RelationalService:
                     similarity = row.get('similarity')
                     feature_data = row.get('feature_data', {})
                     
+                    # ФИКС: Проверяем similarity на валидность
+                    if similarity is not None:
+                        try:
+                            similarity_float = float(similarity)
+                            # Проверяем, что это число и не NaN
+                            if not math.isnan(similarity_float):
+                                similarity_value = similarity_float
+                            else:
+                                similarity_value = None
+                        except (ValueError, TypeError):
+                            similarity_value = None
+                    else:
+                        similarity_value = None
+                    
                     # ПРИНУДИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ КОНТЕНТА
                     final_content = content
                     if not final_content and structured_data:
@@ -969,13 +984,16 @@ class RelationalService:
                         final_content = f"Описание вида {species_name}"
                         logger.warning(f"⚠️  КОНТЕНТ ОТСУТСТВУЕТ, создана заглушка")
                     
-                    if final_content and similarity is not None:
+                    if final_content:
                         item = {
                             "content": final_content,
-                            "similarity": float(similarity),
                             "source": "structured_data" if not content and structured_data else "content",
                             "feature_data": feature_data
                         }
+                        # Добавляем similarity только если оно валидно
+                        if similarity_value is not None:
+                            item["similarity"] = similarity_value
+                            
                         if structured_data:
                             item["structured_data"] = structured_data
                         formatted_results.append(item)
