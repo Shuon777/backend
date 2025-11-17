@@ -192,7 +192,6 @@ def objects_in_polygon_simply():
         stoplisted_objects = []
         
         for obj in objects:
-            # Проверяем feature_data объектов на in_stoplist
             feature_data = obj.get("features", {})
             obj_in_stoplist = feature_data.get("in_stoplist")
             
