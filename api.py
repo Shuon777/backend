@@ -74,13 +74,15 @@ def objects_in_polygon_simply():
     name = data.get("name")
     buffer_radius_km = data.get("buffer_radius_km", 0)
     object_type = data.get("object_type")
-    limit = data.get("limit", 20)
+    object_subtype = data.get("object_subtype")
+    limit = data.get("limit", 40)
 
     # Параметры для кеша
     cache_params = {
         "name": name,
         "buffer_radius_km": buffer_radius_km,
         "object_type": object_type,
+        "object_subtype": object_subtype,
         "limit": limit,
         "in_stoplist": in_stoplist,
         "version": "v2"
@@ -105,20 +107,18 @@ def objects_in_polygon_simply():
         "name": name,
         "buffer_radius_km": buffer_radius_km,
         "object_type": object_type,
+        "object_subtype": object_subtype,
         "limit": limit,
         "in_stoplist": in_stoplist
     }
     
     # Проверяем синонимы перед поиском геометрии
     try:
-        # Получаем основное название из синонимов
         synonyms_data = search_service.get_synonyms_for_name(name)
         
-        # Если найдены синонимы, используем основное название
         if "error" not in synonyms_data:
             main_names = list(synonyms_data.keys())
             if main_names:
-                # Используем первое основное название
                 canonical_name = main_names[0]
                 logger.debug(f"Найден синоним: '{name}' -> '{canonical_name}'")
                 name = canonical_name
@@ -134,11 +134,9 @@ def objects_in_polygon_simply():
             "step": "synonym_resolution",
             "error": str(e)
         })
-        # Продолжаем с оригинальным именем
     
     entry = get_place(name)
     if not entry or "geometry" not in entry:
-        # Если не нашли по основному названию, пробуем найти через гибкий поиск
         flexible_result = find_place_flexible(name)
         if flexible_result and flexible_result.get("status") == "found":
             entry = flexible_result["record"]
@@ -167,14 +165,28 @@ def objects_in_polygon_simply():
         return jsonify(response), 400
     
     try:
+        # Получаем объекты из search_service
         results = search_service.get_objects_in_polygon(
             polygon_geojson=polygon,
             buffer_radius_km=float(buffer_radius_km),
             object_type=object_type,
+            object_subtype=object_subtype,
             limit=int(limit)
         )
+        
         objects = results.get("objects", [])
         answer = results.get("answer", "")
+        
+        # ДИАГНОСТИКА: Собираем статистику ДО фильтрации
+        total_objects_before = len(objects)
+        biological_objects_before = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
+        biological_names_before = list(set(obj.get('name', 'Без имени') for obj in biological_objects_before))
+        
+        debug_info["before_filter"] = {
+            "total_objects": total_objects_before,
+            "biological_objects_count": len(biological_objects_before),
+            "biological_names": biological_names_before
+        }
         
         # ФИЛЬТРАЦИЯ ПО STOPLIST для найденных объектов
         safe_objects = []
@@ -200,23 +212,34 @@ def objects_in_polygon_simply():
                     logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
         
         objects = safe_objects
+        logger.debug(objects)
+        # ДИАГНОСТИКА: Собираем статистику ПОСЛЕ фильтрации
+        total_objects_after = len(objects)
+        biological_objects_after = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
+        biological_names_after = list(set(obj.get('name', 'Без имени') for obj in biological_objects_after))
+        
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Формируем all_biological_names ПОСЛЕ фильтрации
+        all_biological_names = sorted(biological_names_after)
         
         # Обновляем ответ с учетом фильтрации
         if stoplisted_objects:
             answer = f"{answer} (исключено {len(stoplisted_objects)} объектов по уровню безопасности)"
         
-        # Debug информация о результатах поиска
+        # Debug информация о результатах поиска и фильтрации
         debug_info["search_results"] = {
             "total_objects": len(objects),
             "object_types": {},
             "polygon_area": "calculated" if polygon else "unknown"
         }
         
-        # Debug информация о фильтрации stoplist
         debug_info["stoplist_filter"] = {
-            "total_before_filter": len(results.get("objects", [])),
-            "safe_after_filter": len(objects),
-            "stoplisted_count": len(stoplisted_objects)
+            "total_before_filter": total_objects_before,
+            "safe_after_filter": total_objects_after,
+            "stoplisted_count": len(stoplisted_objects),
+            "biological_before_filter": len(biological_objects_before),
+            "biological_after_filter": len(biological_objects_after),
+            "biological_names_before": biological_names_before,
+            "biological_names_after": biological_names_after
         }
         
         # Статистика по типам объектов
@@ -226,14 +249,6 @@ def objects_in_polygon_simply():
                 debug_info["search_results"]["object_types"][obj_type] = 0
             debug_info["search_results"]["object_types"][obj_type] += 1
             
-            # Добавляем ID объектов для отладки
-            if "id" in obj:
-                if "object_ids" not in debug_info["search_results"]:
-                    debug_info["search_results"]["object_ids"] = {}
-                if obj_type not in debug_info["search_results"]["object_ids"]:
-                    debug_info["search_results"]["object_ids"][obj_type] = []
-                debug_info["search_results"]["object_ids"][obj_type].append(obj["id"])
-                
     except ValueError:
         response = {"error": "Invalid parameters format"}
         if debug_mode:
@@ -252,7 +267,8 @@ def objects_in_polygon_simply():
             "status": "no_objects", 
             "message": answer,
             "used_objects": [],
-            "not_used_objects": []
+            "not_used_objects": [],
+            "all_biological_names": []  # Явно указываем пустой массив
         }
         if debug_mode:
             response["debug"] = debug_info
@@ -260,24 +276,18 @@ def objects_in_polygon_simply():
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response)
 
-    # Собираем полный список имен для ответа
-    all_biological_names = sorted(list(set(
-        obj.get('name', 'Без имени') 
-        for obj in objects if obj.get('type') == 'biological_entity'
-    )))
-
     # Группируем объекты по геометрии и типу
     grouped_by_geojson = {}
     for obj in objects:
         if 'geojson' not in obj or not obj['geojson']:
             continue
         geojson_key = json.dumps(obj['geojson'], sort_keys=True)
-        obj_type = obj.get('type', 'unknown')  # Получаем тип объекта
+        obj_type = obj.get('type', 'unknown')
         
         if geojson_key not in grouped_by_geojson:
             grouped_by_geojson[geojson_key] = {
                 'geojson': obj['geojson'],
-                'type': obj_type,  # Сохраняем тип первого объекта в группе
+                'type': obj_type,
                 'names': []
             }
         object_name = obj.get('name', 'Без имени')
@@ -291,17 +301,17 @@ def objects_in_polygon_simply():
         "group_types": [group.get('type', 'unknown') for group in grouped_by_geojson.values()]
     }
 
-    # --- ИСПРАВЛЕННАЯ ЛОГИКА ФОРМИРОВАНИЯ ТЕКСТА ---
+    # Формируем объекты для карты
     objects_for_map = []
-    MAX_NAMES_IN_TOOLTIP = 3  # Максимум имен для краткого отображения
+    MAX_NAMES_IN_TOOLTIP = 3
 
     # Собираем информацию об объектах для фронтенда
-    used_objects = []  # Объекты, которые будут на карте
-    not_used_objects = []  # Объекты, которые не попали на карту
+    used_objects = []
+    not_used_objects = []
 
     for group_data in grouped_by_geojson.values():
         names = sorted(group_data['names'])
-        obj_type = group_data.get('type', 'unknown')  # Получаем тип из group_data
+        obj_type = group_data.get('type', 'unknown')
         
         # Добавляем объекты в used_objects
         for name in names:
@@ -310,13 +320,13 @@ def objects_in_polygon_simply():
                 "type": obj_type
             })
         
-        # 1. Создаем краткий текст для Tooltip (при наведении)
+        # Создаем краткий текст для Tooltip
         if len(names) > MAX_NAMES_IN_TOOLTIP:
             tooltip_text = f"{', '.join(names[:MAX_NAMES_IN_TOOLTIP])} и еще {len(names) - MAX_NAMES_IN_TOOLTIP}..."
         else:
             tooltip_text = ", ".join(names)
 
-        # 2. Создаем красивый HTML для Popup (при клике) с учетом типа
+        # Создаем красивый HTML для Popup с учетом типа
         if obj_type == "biological_entity":
             popup_html = f"<h6>Обнаружено видов: {len(names)}</h6>"
         else:
@@ -333,19 +343,16 @@ def objects_in_polygon_simply():
             'geojson': group_data['geojson']
         })
 
-    # В этом эндпоинте все найденные объекты должны быть used_objects,
-    # так как мы группируем их для отображения на карте
-    # not_used_objects оставляем пустым
-
     try:
-        # Создаем карту с именем из redis_key (кешированное имя)
+        # Создаем карту
         map_name = redis_key.replace("cache:", "map_").replace(":", "_")
         map_result = geo.draw_custom_geometries(objects_for_map, map_name)
         
         map_result["count"] = len(objects_for_map)
         map_result["answer"] = answer
-        # В 'grouped_names' теперь отправляем краткие имена для tooltip
         map_result["grouped_names"] = [obj.get("tooltip", "") for obj in objects_for_map]
+        
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Используем all_biological_names, сформированный ПОСЛЕ фильтрации
         map_result["all_biological_names"] = all_biological_names
         
         # Добавляем информацию об объектах для фронтенда
@@ -355,18 +362,19 @@ def objects_in_polygon_simply():
         # Добавляем информацию о фильтрации по stoplist
         map_result["in_stoplist_filter_applied"] = True
         map_result["in_stoplist_level"] = in_stoplist
-        map_result["stoplisted_count"] = len(stoplisted_objects) if 'stoplisted_objects' in locals() else 0
+        map_result["stoplisted_count"] = len(stoplisted_objects)
         
         # Добавляем debug информацию
         if debug_mode:
             debug_info["visualization"] = {
                 "map_name": map_name,
                 "objects_count": len(objects_for_map),
-                "biological_names_count": len(all_biological_names)
+                "biological_names_count": len(all_biological_names),
+                "biological_names_list": all_biological_names  # Для отладки
             }
             map_result["debug"] = debug_info
 
-        # Сохраняем в кеш (45 минут для поиска по полигону)
+        # Сохраняем в кеш
         set_cached_result(redis_key, map_result, expire_time=2700)
         
         return jsonify(map_result)
@@ -378,14 +386,15 @@ def objects_in_polygon_simply():
             "status": "error", 
             "message": f"Ошибка отрисовки карты: {e}",
             "used_objects": [],
-            "not_used_objects": []
+            "not_used_objects": [],
+            "all_biological_names": all_biological_names  # Сохраняем даже при ошибке
         }
         if debug_mode:
             response["debug"] = debug_info
             response["in_stoplist_filter_applied"] = True
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response), 500
-        
+     
 @app.route("/objects_in_area_by_type", methods=["POST"])
 def objects_in_area_by_type():
     data = request.get_json()

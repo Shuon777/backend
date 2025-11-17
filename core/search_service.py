@@ -791,14 +791,17 @@ class SearchService:
     polygon_geojson: dict,
     buffer_radius_km: float = 0,
     object_type: str = None,
+    object_subtype: str = None,  # НОВЫЙ ПАРАМЕТР
     limit: int = 70
 ) -> Dict[str, Any]:
-        """Поиск объектов внутри полигона и в буферной зоне"""
+        """Поиск объектов внутри полигона и в буферной зоне с поддержкой подтипов"""
         try:
+            # ИСПРАВЛЕННЫЙ ВЫЗОВ - передаем object_subtype в geo_service
             results = self.geo_service.get_objects_in_polygon(
                 polygon_geojson=polygon_geojson,
                 buffer_radius_km=buffer_radius_km,
                 object_type=object_type,
+                object_subtype=object_subtype,  # ПЕРЕДАЕМ ПОДТИП
                 limit=limit
             )
             
@@ -839,7 +842,11 @@ class SearchService:
             
             biological_objects_str = ", ".join(biological_objects) if biological_objects else "биологические объекты не найдены"
             
-            answer = f"Найдено {total_count} объектов в области {area_desc} ({type_summary}). Биологические объекты: {biological_objects_str}"
+            # Обновляем ответ с учетом подтипов
+            if object_subtype:
+                answer = f"Найдено {total_count} объектов типа '{object_type}' подтипа '{object_subtype}' в области {area_desc} ({type_summary}). Биологические объекты: {biological_objects_str}"
+            else:
+                answer = f"Найдено {total_count} объектов в области {area_desc} ({type_summary}). Биологические объекты: {biological_objects_str}"
             
             return {
                 "answer": answer,

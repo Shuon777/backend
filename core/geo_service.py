@@ -331,15 +331,17 @@ class GeoService:
     self,
     polygon_geojson: dict,
     buffer_radius_km: float = 0,
-    limit: int = 20,
-    object_type: str = None
+    object_type: str = None,
+    object_subtype: str = None,  # НОВЫЙ ПАРАМЕТР
+    limit: int = 20
 ) -> List[Dict]:
-        """Поиск объектов внутри полигона и в буферной зоне вокруг него"""
+        """Поиск объектов внутри полигона и в буферной зоне вокруг него с поддержкой подтипов"""
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cursor:
                 polygon_str = json.dumps(polygon_geojson)
                 
+                # Базовый запрос с поддержкой фильтрации по подтипам
                 query = """
                 WITH area AS (
                     SELECT 
@@ -349,23 +351,15 @@ class GeoService:
                         ) AS geom
                 ),
                 entities AS (
-                    SELECT 
-                        be.id,
-                        be.common_name_ru AS name,
-                        be.description,
-                        'biological_entity' AS type,
-                        eg.geographical_entity_id
-                    FROM biological_entity be
-                    JOIN entity_geo eg ON be.id = eg.entity_id 
-                        AND eg.entity_type = 'biological_entity'
-                    {additional_entities}
+                    {entities_query}
                 )
                 SELECT
                     entities.id,
                     entities.name,
                     entities.description,
                     entities.type,
-                    ST_AsGeoJSON(mc.geometry)::json AS geojson,  -- Возвращаем полную геометрию
+                    entities.features,
+                    ST_AsGeoJSON(mc.geometry)::json AS geojson,
                     ST_Distance(
                         CASE 
                             WHEN ST_GeometryType(mc.geometry) = 'ST_Point' 
@@ -383,70 +377,198 @@ class GeoService:
                 )
                 CROSS JOIN area a
                 WHERE ST_Intersects(mc.geometry, a.geom)
+                {subtype_condition}
                 ORDER BY distance_km
                 LIMIT %(limit)s;
                 """
                 
-                additional_entities = ""
-                if not object_type:
-                    additional_entities = """
-                    UNION ALL
-                    SELECT 
-                        ge.id,
-                        ge.name_ru AS name,
-                        ge.description,
-                        'geographical_entity' AS type,
-                        ge.id AS geographical_entity_id
-                    FROM geographical_entity ge
-                    
-                    UNION ALL
-                    SELECT 
-                        ic.id,
-                        ic.title AS name,
-                        ic.description,
-                        'image_content' AS type,
-                        eg.geographical_entity_id
-                    FROM image_content ic
-                    JOIN entity_geo eg ON ic.id = eg.entity_id 
-                        AND eg.entity_type = 'image_content'
-                    
-                    UNION ALL
-                    SELECT 
-                        tc.id,
-                        tc.title AS name,
-                        tc.description,
-                        'text_content' AS type,
-                        eg.geographical_entity_id
-                    FROM text_content tc
-                    JOIN entity_geo eg ON tc.id = eg.entity_id 
-                        AND eg.entity_type = 'text_content'
-                    """
-                elif object_type != "biological_entity":
-                    additional_entities = f"""
-                    UNION ALL
-                    SELECT 
-                        e.id,
-                        e.name,
-                        e.description,
-                        '{object_type}' AS type,
-                        eg.geographical_entity_id
-                    FROM {object_type} e
-                    JOIN entity_geo eg ON e.id = eg.entity_id 
-                        AND eg.entity_type = '{object_type}'
-                    """
-                
-                final_query = query.format(additional_entities=additional_entities)
+                # Формируем запрос для сущностей с учетом типа
+                entities_parts = []
                 params = {
                     'polygon_str': polygon_str,
                     'buffer_radius_km': buffer_radius_km,
                     'limit': limit
                 }
                 
+                # Биологические сущности
+                if not object_type or object_type == "biological_entity":
+                    biological_part = """
+                    SELECT 
+                        be.id,
+                        be.common_name_ru AS name,
+                        be.description,
+                        be.type,  -- ВАЖНО: Добавляем поле type для фильтрации по подтипу
+                        be.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM biological_entity be
+                    JOIN entity_geo eg ON be.id = eg.entity_id 
+                        AND eg.entity_type = 'biological_entity'
+                    """
+                    entities_parts.append(biological_part)
+                
+                # Географические объекты
+                if not object_type or object_type == "geographical_entity":
+                    geographical_part = """
+                    SELECT 
+                        ge.id,
+                        ge.name_ru AS name,
+                        ge.description,
+                        'geographical_entity' AS type,
+                        ge.feature_data AS features,
+                        ge.id AS geographical_entity_id
+                    FROM geographical_entity ge
+                    """
+                    entities_parts.append(geographical_part)
+                
+                # Современные рукотворные объекты
+                if not object_type or object_type == "modern_human_made":
+                    modern_part = """
+                    SELECT 
+                        mhm.id,
+                        mhm.name_ru AS name,
+                        mhm.description,
+                        'modern_human_made' AS type,
+                        mhm.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM modern_human_made mhm
+                    JOIN entity_geo eg ON mhm.id = eg.entity_id 
+                        AND eg.entity_type = 'modern_human_made'
+                    """
+                    entities_parts.append(modern_part)
+                
+                # Древние рукотворные объекты
+                if not object_type or object_type == "ancient_human_made":
+                    ancient_part = """
+                    SELECT 
+                        ahm.id,
+                        ahm.name_ru AS name,
+                        ahm.description,
+                        'ancient_human_made' AS type,
+                        ahm.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM ancient_human_made ahm
+                    JOIN entity_geo eg ON ahm.id = eg.entity_id 
+                        AND eg.entity_type = 'ancient_human_made'
+                    """
+                    entities_parts.append(ancient_part)
+                
+                # Организации
+                if not object_type or object_type == "organization":
+                    org_part = """
+                    SELECT 
+                        org.id,
+                        org.name_ru AS name,
+                        org.description,
+                        'organization' AS type,
+                        org.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM organization org
+                    JOIN entity_geo eg ON org.id = eg.entity_id 
+                        AND eg.entity_type = 'organization'
+                    """
+                    entities_parts.append(org_part)
+                
+                # Исследовательские проекты
+                if not object_type or object_type == "research_project":
+                    research_part = """
+                    SELECT 
+                        rp.id,
+                        rp.title AS name,
+                        rp.description,
+                        'research_project' AS type,
+                        rp.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM research_project rp
+                    JOIN entity_geo eg ON rp.id = eg.entity_id 
+                        AND eg.entity_type = 'research_project'
+                    """
+                    entities_parts.append(research_part)
+                
+                # Волонтерские инициативы
+                if not object_type or object_type == "volunteer_initiative":
+                    volunteer_part = """
+                    SELECT 
+                        vi.id,
+                        vi.name_ru AS name,
+                        vi.description,
+                        'volunteer_initiative' AS type,
+                        vi.feature_data AS features,
+                        eg.geographical_entity_id
+                    FROM volunteer_initiative vi
+                    JOIN entity_geo eg ON vi.id = eg.entity_id 
+                        AND eg.entity_type = 'volunteer_initiative'
+                    """
+                    entities_parts.append(volunteer_part)
+                
+                # Комбинируем все части запроса
+                entities_query = " UNION ALL ".join(entities_parts)
+                
+                # ИСПРАВЛЕННАЯ ЛОГИКА: Условие для фильтрации по подтипу
+                subtype_condition = ""
+                if object_subtype:
+                    if object_type == "biological_entity" or object_type is None:
+                        # Для biological_entity проверяем поле type
+                        subtype_condition = "AND entities.type = %(object_subtype)s"
+                        params['object_subtype'] = object_subtype
+                    else:
+                        # Для других типов объектов используем поиск в feature_data
+                        subtype_condition = """
+                        AND (
+                            -- Поиск в массиве specific_types
+                            entities.features->'geo_type'->'specific_types' ? %(object_subtype)s
+                            OR 
+                            -- Поиск в массиве primary_type
+                            entities.features->'geo_type'->'primary_type' ? %(object_subtype)s
+                            OR
+                            -- Поиск в строковом поле information_type
+                            entities.features->>'information_type' ILIKE %(object_subtype)s
+                            OR
+                            -- Поиск в других возможных строковых полях
+                            entities.features->>'type' ILIKE %(object_subtype)s
+                            OR
+                            entities.features->>'category' ILIKE %(object_subtype)s
+                            OR
+                            -- Для биологических объектов
+                            entities.features->>'flora_type' ILIKE %(object_subtype)s
+                            OR
+                            entities.features->>'fauna_type' ILIKE %(object_subtype)s
+                        )
+                        """
+                        params['object_subtype'] = object_subtype
+                
+                final_query = query.format(
+                    entities_query=entities_query,
+                    subtype_condition=subtype_condition
+                )
+                
+                logger.debug(f"Выполняется поиск объектов в полигоне с параметрами:")
+                logger.debug(f"  - object_type: {object_type}")
+                logger.debug(f"  - object_subtype: {object_subtype}")
+                logger.debug(f"  - buffer_radius_km: {buffer_radius_km}")
+                logger.debug(f"  - limit: {limit}")
+                
                 cursor.execute(final_query, params)
-                return cursor.fetchall()
+                results = cursor.fetchall()
+                
+                # Форматируем результаты
+                formatted_results = []
+                for row in results:
+                    formatted_row = dict(row)
+                    # Преобразование GeoJSON в Python-объект, если нужно
+                    if isinstance(formatted_row['geojson'], str):
+                        formatted_row['geojson'] = json.loads(formatted_row['geojson'])
+                    
+                    # Добавляем features в результат для дальнейшей обработки
+                    if 'features' not in formatted_row:
+                        formatted_row['features'] = {}
+                    
+                    formatted_results.append(formatted_row)
+                
+                logger.debug(f"Найдено объектов: {len(formatted_results)}")
+                return formatted_results
                 
         except Exception as e:
-            logger.error(f"Ошибка поиска объектов по полигону: {str(e)}")
+            logger.error(f"Ошибка поиска объектов по полигону: {str(e)}", exc_info=True)
             return []
         finally:
             conn.close()
