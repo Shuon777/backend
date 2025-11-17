@@ -188,7 +188,6 @@ def objects_in_polygon_simply():
             "biological_names": biological_names_before
         }
         
-        # ФИЛЬТРАЦИЯ ПО STOPLIST для найденных объектов
         safe_objects = []
         stoplisted_objects = []
         
