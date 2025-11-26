@@ -1410,51 +1410,77 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
     def _extract_content_from_structured_data(self, structured_data: Dict) -> str:
         """
         Извлекает и форматирует текстовый контент из structured_data
+        Поддерживает как флору, так и фауну
         """
         if not structured_data:
             return ""
         
         content_sections = []
         
-        # Русские названия разделов (заменяем английские ключи)
+        # Русские названия разделов для флоры и фауны
         section_titles = {
+            # Общие разделы
+            'taxonomy': 'Таксономия',
             'morphology': 'Морфология',
             'ecology': 'Экология', 
             'distribution': 'Распространение',
-            'phenology': 'Фенология',
-            'significance': 'Значение',
             'conservation': 'Охранный статус',
-            'taxonomy': 'Таксономия'
+            'significance': 'Значение',
+            
+            # Разделы для флоры
+            'phenology': 'Фенология',
+            
+            # Разделы для фауны  
+            'biology': 'Биология',
         }
         
-        # Русские названия полей (заменяем английские ключи)
+        # Русские названия полей для флоры и фауны
         field_titles = {
+            # Общие поля
             'general_description': 'Общее описание',
             'habitat': 'Местообитание',
             'ecological_role': 'Экологическая роль',
             'geographical_range': 'Географический ареал',
             'baikal_region_status': 'Статус в Байкальском регионе',
-            'flowering_period': 'Период цветения',
-            'fruiting_period': 'Период плодоношения',
             'practical_use': 'Практическое использование',
             'scientific_value': 'Научное значение',
+            'threats': 'Угрозы',
+            'red_book_status': 'Статус в Красной книге',
+            'protection_status': 'Статус охраны',
+            'protected_areas': 'Охраняемые территории',
+            
+            # Поля таксономии
+            'family': 'Семейство',
+            'genus': 'Род', 
+            'species': 'Вид',
+            
+            # Поля морфологии
+            'size_weight': 'Размер и вес',
+            'body_structure': 'Строение тела',
+            'coloration': 'Окрас',
+            'special_adaptations': 'Особые адаптации',
+            
+            # Поля для флоры
+            'flowering_period': 'Период цветения',
+            'fruiting_period': 'Период плодоношения', 
+            'vegetation_period': 'Период вегетации',
             'soil_preferences': 'Предпочтения к почве',
             'light_requirements': 'Требования к свету',
-            'species_interactions': 'Взаимодействие с другими видами',
             'moisture_requirements': 'Требования к влаге',
-            'genus': 'Род',
-            'family': 'Семейство', 
-            'species': 'Вид',
-            'vegetation_period': 'Период вегетации',
+            'species_interactions': 'Взаимодействие с другими видами',
             'stem': 'Стебель',
             'roots': 'Корни',
             'fruits': 'Плоды',
             'leaves': 'Листья',
             'flowers': 'Цветы',
-            'threats': 'Угрозы',
-            'red_book_status': 'Статус в Красной книге',
-            'protection_status': 'Статус охраны',
-            'protected_areas': 'Охраняемые территории'
+            
+            # Поля для фауны
+            'diet': 'Питание',
+            'reproduction': 'Размножение',
+            'lifespan': 'Продолжительность жизни',
+            'behavior': 'Поведение',
+            'predators': 'Хищники',
+            'depth_distribution': 'Распределение по глубинам',
         }
         
         for section, section_data in structured_data.items():

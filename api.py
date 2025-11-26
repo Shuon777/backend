@@ -1785,6 +1785,7 @@ def get_object_description():
        
 @app.route("/species/description/", methods=["GET"])
 def get_species_description():
+    logger.info(f"📦 /species/description - GET params: {dict(request.args)}")
     species_name = request.args.get("species_name")
     query = request.args.get("query")
     limit = int(request.args.get("limit", 5))
