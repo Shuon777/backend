@@ -75,7 +75,7 @@ def objects_in_polygon_simply():
     buffer_radius_km = data.get("buffer_radius_km", 0)
     object_type = data.get("object_type")
     object_subtype = data.get("object_subtype")
-    limit = data.get("limit", 40)
+    limit = data.get("limit", 1500)
 
     # Параметры для кеша
     cache_params = {
@@ -274,6 +274,8 @@ def objects_in_polygon_simply():
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response)
 
+    # ... (around line 250 in api.py)
+
     # Группируем объекты по геометрии и типу
     grouped_by_geojson = {}
     for obj in objects:
@@ -282,22 +284,21 @@ def objects_in_polygon_simply():
         geojson_key = json.dumps(obj['geojson'], sort_keys=True)
         obj_type = obj.get('type', 'unknown')
         
+        # ИСПРАВЛЕНИЕ: Сохраняем название географического объекта
+        location_name = obj.get('location_name') or obj.get('name') or 'Неизвестное место'
+        
         if geojson_key not in grouped_by_geojson:
             grouped_by_geojson[geojson_key] = {
                 'geojson': obj['geojson'],
                 'type': obj_type,
-                'names': []
+                'location_name': location_name,  # Сохраняем название геообъекта
+                'biological_names': []           # Переименовываем для ясности
             }
         object_name = obj.get('name', 'Без имени')
-        if object_name not in grouped_by_geojson[geojson_key]['names']:
-            grouped_by_geojson[geojson_key]['names'].append(object_name)
+        if object_name not in grouped_by_geojson[geojson_key]['biological_names']:
+            grouped_by_geojson[geojson_key]['biological_names'].append(object_name)
 
-    # Debug информация о группировке
-    debug_info["grouping"] = {
-        "total_groups": len(grouped_by_geojson),
-        "objects_per_group": [len(group['names']) for group in grouped_by_geojson.values()],
-        "group_types": [group.get('type', 'unknown') for group in grouped_by_geojson.values()]
-    }
+    # ... существующий код группировки ...
 
     # Формируем объекты для карты
     objects_for_map = []
@@ -308,31 +309,33 @@ def objects_in_polygon_simply():
     not_used_objects = []
 
     for group_data in grouped_by_geojson.values():
-        names = sorted(group_data['names'])
+        biological_names = sorted(group_data['biological_names'])
+        location_name = group_data.get('location_name', 'Неизвестное место')
         obj_type = group_data.get('type', 'unknown')
         
-        # Добавляем объекты в used_objects
-        for name in names:
-            used_objects.append({
-                "name": name,
-                "type": obj_type
-            })
+        # Добавляем объекты в used_objects с названием геообъекта
+        used_objects.append({
+            "name": location_name,  # Используем название геообъекта
+            "type": obj_type
+        })
         
         # Создаем краткий текст для Tooltip
-        if len(names) > MAX_NAMES_IN_TOOLTIP:
-            tooltip_text = f"{', '.join(names[:MAX_NAMES_IN_TOOLTIP])} и еще {len(names) - MAX_NAMES_IN_TOOLTIP}..."
+        if len(biological_names) > MAX_NAMES_IN_TOOLTIP:
+            tooltip_text = f"{location_name}: {len(biological_names)} видов"
         else:
-            tooltip_text = ", ".join(names)
+            tooltip_text = f"{location_name}: {', '.join(biological_names)}"
 
-        # Создаем красивый HTML для Popup с учетом типа
+        # Создаем красивый HTML для Popup с названием географического объекта
+        popup_html = f"<h5>{location_name}</h5>"
+        
         if obj_type == "biological_entity":
-            popup_html = f"<h6>Обнаружено видов: {len(names)}</h6>"
+            popup_html += f"<h6>Обнаружено видов: {len(biological_names)}</h6>"
         else:
-            popup_html = f"<h6>Обнаружено объектов: {len(names)}</h6>"
+            popup_html += f"<h6>Обнаружено объектов: {len(biological_names)}</h6>"
         
         popup_html += '<ul style="padding-left: 20px; margin-top: 5px;">'
-        for n in names:
-            popup_html += f"<li>{n}</li>"
+        for biological_name in biological_names:
+            popup_html += f"<li>{biological_name}</li>"
         popup_html += "</ul>"
         
         objects_for_map.append({
@@ -340,6 +343,10 @@ def objects_in_polygon_simply():
             'popup': popup_html,
             'geojson': group_data['geojson']
         })
+
+    # ... остальной код ...
+
+    # ... (rest of the code)
 
     try:
         # Создаем карту
@@ -431,7 +438,7 @@ def objects_in_area_by_type():
     object_type = data.get("object_type", "all") 
     object_subtype = data.get("object_subtype")
     object_name = data.get("object_name")
-    limit = data.get("limit", 20)
+    limit = data.get("limit", 1500)
     search_around = data.get("search_around", False)
     buffer_radius_km = data.get("buffer_radius_km", 10.0)
 
@@ -1068,7 +1075,7 @@ def get_object_description():
     
     object_name = request.args.get("object_name")
     query = request.args.get("query")
-    limit = int(request.args.get("limit", 0))
+    limit = int(request.args.get("limit", 1500))
     similarity_threshold = float(request.args.get("similarity_threshold", 0.35))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
@@ -1220,7 +1227,7 @@ def get_object_description():
 
     try:
         # Определяем лимиты для разных случаев
-        search_limit = limit if limit > 0 else 100
+        search_limit = limit if limit > 0 else 1500
         context_limit = 5
         
         if filter_data:
@@ -1471,20 +1478,20 @@ def get_object_description():
             
             # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА
             full_prompt = f"""Ты эксперт по Байкальской природной территории. 
-Используй твою базу знаний для точных ответов на вопросы пользователя.
+            Используй твою базу знаний для точных ответов на вопросы пользователя.
 
-Особые указания:
-- На вопросы 'сколько' - подсчитай количество соответствующих записей в базе знаний
-Например, на вопрос 'Сколько музеев?' при информации 'Всего найдено записей: 98 (в контекст включено топ-5 по релевантности)', нужно ответить около 98 музеев и затем описание каждого музея из топ записей
-- Будь информативным и лаконичным
-- Даже при неполной информации предоставь доступные детали
+            Особые указания:
+            - На вопросы 'сколько' - подсчитай количество соответствующих записей в базе знаний
+            Например, на вопрос 'Сколько музеев?' при информации 'Всего найдено записей: 98 (в контекст включено топ-5 по релевантности)', нужно ответить около 98 музеев и затем описание каждого музея из топ записей
+            - Будь информативным и лаконичным
+            - Даже при неполной информации предоставь доступные детали
 
-Твоя база знаний:
-{context}
+            Твоя база знаний:
+            {context}
 
-Вопрос: {query}
+            Вопрос: {query}
 
-Ответ:"""
+            Ответ:"""
             
             if save_prompt:
                 current_dir = Path(__file__).parent
@@ -1788,7 +1795,7 @@ def get_species_description():
     logger.info(f"📦 /species/description - GET params: {dict(request.args)}")
     species_name = request.args.get("species_name")
     query = request.args.get("query")
-    limit = int(request.args.get("limit", 5))
+    limit = int(request.args.get("limit", 1500))
     similarity_threshold = float(request.args.get("similarity_threshold", 0.1))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
@@ -2476,7 +2483,7 @@ def api_coords_to_map():
 def find_species_with_description():
     data = request.get_json()
     name = data.get("name")
-    limit = data.get("limit", 5)
+    limit = data.get("limit", 1500)
     offset = data.get("offset", 0)
     
     logger.info(f"POST /find_species_with_description - name: {name}, limit: {limit}, offset: {offset}")

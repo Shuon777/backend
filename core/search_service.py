@@ -791,17 +791,17 @@ class SearchService:
     polygon_geojson: dict,
     buffer_radius_km: float = 0,
     object_type: str = None,
-    object_subtype: str = None,  # НОВЫЙ ПАРАМЕТР
+    object_subtype: str = None,
     limit: int = 70
 ) -> Dict[str, Any]:
         """Поиск объектов внутри полигона и в буферной зоне с поддержкой подтипов"""
         try:
-            # ИСПРАВЛЕННЫЙ ВЫЗОВ - передаем object_subtype в geo_service
+            # Получаем полную информацию об объектах с названиями геообъектов
             results = self.geo_service.get_objects_in_polygon(
                 polygon_geojson=polygon_geojson,
                 buffer_radius_km=buffer_radius_km,
                 object_type=object_type,
-                object_subtype=object_subtype,  # ПЕРЕДАЕМ ПОДТИП
+                object_subtype=object_subtype,
                 limit=limit
             )
             
@@ -821,8 +821,10 @@ class SearchService:
                 obj_type = obj.get("type", "unknown")
                 type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
                 
+                # ВАЖНО: Сохраняем информацию о географическом объекте
                 formatted_obj = {
-                    "name": obj["name"],
+                    "name": obj["name"],  # Название биологического вида
+                    "location_name": obj.get("geo_name") or obj["name"],  # Название геообъекта
                     "distance": f"{obj['distance_km']:.1f} км от центра",
                     "type": obj_type,
                     "geojson": obj["geojson"]
@@ -835,6 +837,9 @@ class SearchService:
                     formatted_obj["description"] = obj["description"][:200] + "..." if len(obj["description"]) > 200 else obj["description"]
                 
                 formatted_results.append(formatted_obj)
+            
+            # ... остальной код без изменений ...
+            
             
             total_count = len(results)
             type_summary = ", ".join([f"{count} {type_name}" for type_name, count in type_counts.items()])

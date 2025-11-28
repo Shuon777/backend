@@ -332,7 +332,7 @@ class GeoService:
     polygon_geojson: dict,
     buffer_radius_km: float = 0,
     object_type: str = None,
-    object_subtype: str = None,  # НОВЫЙ ПАРАМЕТР
+    object_subtype: str = None,
     limit: int = 20
 ) -> List[Dict]:
         """Поиск объектов внутри полигона и в буферной зоне вокруг него с поддержкой подтипов"""
@@ -359,6 +359,7 @@ class GeoService:
                     entities.description,
                     entities.type,
                     entities.features,
+                    entities.geo_name,  -- ДОБАВЛЕНО: название географического объекта
                     ST_AsGeoJSON(mc.geometry)::json AS geojson,
                     ST_Distance(
                         CASE 
@@ -390,23 +391,25 @@ class GeoService:
                     'limit': limit
                 }
                 
-                # Биологические сущности
+                # Биологические сущности - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "biological_entity":
                     biological_part = """
                     SELECT 
                         be.id,
-                        be.common_name_ru AS name,
+                        be.common_name_ru AS name,  -- Название биологического вида
                         be.description,
-                        be.type,  -- ВАЖНО: Добавляем поле type для фильтрации по подтипу
+                        be.type,
                         be.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM biological_entity be
                     JOIN entity_geo eg ON be.id = eg.entity_id 
                         AND eg.entity_type = 'biological_entity'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(biological_part)
                 
-                # Географические объекты
+                # Географические объекты - ИСПРАВЛЕНО: используем name_ru как geo_name
                 if not object_type or object_type == "geographical_entity":
                     geographical_part = """
                     SELECT 
@@ -415,12 +418,13 @@ class GeoService:
                         ge.description,
                         'geographical_entity' AS type,
                         ge.feature_data AS features,
-                        ge.id AS geographical_entity_id
+                        ge.id AS geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM geographical_entity ge
                     """
                     entities_parts.append(geographical_part)
                 
-                # Современные рукотворные объекты
+                # Современные рукотворные объекты - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "modern_human_made":
                     modern_part = """
                     SELECT 
@@ -429,14 +433,16 @@ class GeoService:
                         mhm.description,
                         'modern_human_made' AS type,
                         mhm.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM modern_human_made mhm
                     JOIN entity_geo eg ON mhm.id = eg.entity_id 
                         AND eg.entity_type = 'modern_human_made'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(modern_part)
                 
-                # Древние рукотворные объекты
+                # Древние рукотворные объекты - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "ancient_human_made":
                     ancient_part = """
                     SELECT 
@@ -445,14 +451,16 @@ class GeoService:
                         ahm.description,
                         'ancient_human_made' AS type,
                         ahm.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM ancient_human_made ahm
                     JOIN entity_geo eg ON ahm.id = eg.entity_id 
                         AND eg.entity_type = 'ancient_human_made'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(ancient_part)
                 
-                # Организации
+                # Организации - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "organization":
                     org_part = """
                     SELECT 
@@ -461,14 +469,16 @@ class GeoService:
                         org.description,
                         'organization' AS type,
                         org.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM organization org
                     JOIN entity_geo eg ON org.id = eg.entity_id 
                         AND eg.entity_type = 'organization'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(org_part)
                 
-                # Исследовательские проекты
+                # Исследовательские проекты - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "research_project":
                     research_part = """
                     SELECT 
@@ -477,14 +487,16 @@ class GeoService:
                         rp.description,
                         'research_project' AS type,
                         rp.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM research_project rp
                     JOIN entity_geo eg ON rp.id = eg.entity_id 
                         AND eg.entity_type = 'research_project'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(research_part)
                 
-                # Волонтерские инициативы
+                # Волонтерские инициативы - ИСПРАВЛЕНО: добавляем название географического объекта
                 if not object_type or object_type == "volunteer_initiative":
                     volunteer_part = """
                     SELECT 
@@ -493,42 +505,37 @@ class GeoService:
                         vi.description,
                         'volunteer_initiative' AS type,
                         vi.feature_data AS features,
-                        eg.geographical_entity_id
+                        eg.geographical_entity_id,
+                        ge.name_ru AS geo_name  -- ДОБАВЛЕНО: название географического объекта
                     FROM volunteer_initiative vi
                     JOIN entity_geo eg ON vi.id = eg.entity_id 
                         AND eg.entity_type = 'volunteer_initiative'
+                    JOIN geographical_entity ge ON eg.geographical_entity_id = ge.id  -- ДОБАВЛЕНО: джойн с географическими объектами
                     """
                     entities_parts.append(volunteer_part)
                 
                 # Комбинируем все части запроса
                 entities_query = " UNION ALL ".join(entities_parts)
                 
-                # ИСПРАВЛЕННАЯ ЛОГИКА: Условие для фильтрации по подтипу
+                # Условие для фильтрации по подтипу (без изменений)
                 subtype_condition = ""
                 if object_subtype:
                     if object_type == "biological_entity" or object_type is None:
-                        # Для biological_entity проверяем поле type
                         subtype_condition = "AND entities.type = %(object_subtype)s"
                         params['object_subtype'] = object_subtype
                     else:
-                        # Для других типов объектов используем поиск в feature_data
                         subtype_condition = """
                         AND (
-                            -- Поиск в массиве specific_types
                             entities.features->'geo_type'->'specific_types' ? %(object_subtype)s
                             OR 
-                            -- Поиск в массиве primary_type
                             entities.features->'geo_type'->'primary_type' ? %(object_subtype)s
                             OR
-                            -- Поиск в строковом поле information_type
                             entities.features->>'information_type' ILIKE %(object_subtype)s
                             OR
-                            -- Поиск в других возможных строковых полях
                             entities.features->>'type' ILIKE %(object_subtype)s
                             OR
                             entities.features->>'category' ILIKE %(object_subtype)s
                             OR
-                            -- Для биологических объектов
                             entities.features->>'flora_type' ILIKE %(object_subtype)s
                             OR
                             entities.features->>'fauna_type' ILIKE %(object_subtype)s
@@ -561,6 +568,10 @@ class GeoService:
                     # Добавляем features в результат для дальнейшей обработки
                     if 'features' not in formatted_row:
                         formatted_row['features'] = {}
+                    
+                    # ДОБАВЛЕНО: Если geo_name отсутствует, используем name как fallback
+                    if 'geo_name' not in formatted_row or not formatted_row['geo_name']:
+                        formatted_row['geo_name'] = formatted_row.get('name', 'Неизвестная локация')
                     
                     formatted_results.append(formatted_row)
                 
