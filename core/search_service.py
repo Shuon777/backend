@@ -409,6 +409,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка семантического поиска объектов: {str(e)}")
             return []
+    
     def _generate_gigachat_answer(self, question: str, context: str) -> Dict[str, Any]:
         """
         Генерирует ответ GigaChat на основе вопроса и контекста
@@ -807,6 +808,26 @@ class SearchService:
                 limit=limit
             )
             
+            # ЕСЛИ ЕСТЬ БУФЕРНАЯ ЗОНА - ОБРЕЗАЕМ ПОЛИГОНЫ
+            if buffer_radius_km > 0:
+                try:
+                    # Создаем буферную зону для обрезки
+                    buffer_geometry = self.geo_service.create_buffer_geometry(
+                        polygon_geojson, 
+                        buffer_radius_km
+                    )
+                    
+                    if buffer_geometry:
+                        logger.info(f"🔪 Обрезка полигонов по буферной зоне {buffer_radius_km} км")
+                        results = self.geo_service.clip_geometries_to_buffer(
+                            results, 
+                            buffer_geometry
+                        )
+                        logger.info(f"✅ Полигоны обрезаны. Осталось объектов: {len(results)}")
+                except Exception as e:
+                    logger.error(f"Ошибка обрезки полигонов: {str(e)}")
+                    # Продолжаем с необрезанными полигонами в случае ошибки
+            
             if not results:
                 return {
                     "answer": "В указанной области не найдено объектов",
@@ -814,6 +835,7 @@ class SearchService:
                     "polygon": polygon_geojson,
                     "biological_objects": ""
                 }
+            
             
             formatted_results = []
             type_counts = {}

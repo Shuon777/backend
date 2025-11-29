@@ -177,6 +177,37 @@ def objects_in_polygon_simply():
         objects = results.get("objects", [])
         answer = results.get("answer", "")
         
+        # ДОБАВЛЯЕМ: Если есть буферная зона, обрезаем полигоны
+        if float(buffer_radius_km) > 0:
+            try:
+                logger.info(f"🔪 Применена обрезка полигонов по буферной зоне {buffer_radius_km} км")
+                # Создаем буферную зону для обрезки
+                buffer_geometry = search_service.geo_service.create_buffer_geometry(
+                    polygon, 
+                    float(buffer_radius_km)
+                )
+                
+                if buffer_geometry:
+                    # Обрезаем геометрии объектов
+                    clipped_objects = search_service.geo_service.clip_geometries_to_buffer(
+                        objects, 
+                        buffer_geometry
+                    )
+                    
+                    # Заменяем объекты на обрезанные
+                    objects = clipped_objects
+                    logger.info(f"✅ Полигоны обрезаны. Осталось объектов: {len(objects)}")
+                    
+                    # Обновляем ответ
+                    if 'обрезаны' not in answer.lower():
+                        answer = f"{answer} (полигоны обрезаны по буферной зоне)"
+                        
+            except Exception as e:
+                logger.error(f"Ошибка обрезки полигонов: {str(e)}")
+
+        objects = results.get("objects", [])
+        answer = results.get("answer", "")
+        
         # ДИАГНОСТИКА: Собираем статистику ДО фильтрации
         total_objects_before = len(objects)
         logger.debug(f"Объектов: {total_objects_before}")

@@ -64,6 +64,50 @@ class GeoService:
         
         return list(canonical_names)
     
+    def clip_geometries_to_buffer(self, geometries: List[Dict], buffer_geometry: dict) -> List[Dict]:
+        """
+        Обрезает полигоны по границе буферной зоны
+        """
+        conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
+        try:
+            with conn.cursor() as cursor:
+                buffer_geojson_str = json.dumps(buffer_geometry)
+                
+                clipped_geometries = []
+                for geometry in geometries:
+                    if not geometry.get('geojson'):
+                        continue
+                        
+                    geometry_geojson_str = json.dumps(geometry['geojson'])
+                    
+                    query = """
+                    SELECT ST_AsGeoJSON(
+                        ST_Intersection(
+                            ST_GeomFromGeoJSON(%s)::geometry,
+                            ST_GeomFromGeoJSON(%s)::geometry
+                        )
+                    )::json AS clipped_geojson;
+                    """
+                    
+                    cursor.execute(query, (geometry_geojson_str, buffer_geojson_str))
+                    result = cursor.fetchone()
+                    
+                    if result and result['clipped_geojson']:
+                        # Используем обрезанную геометрию
+                        geometry['geojson'] = result['clipped_geojson']
+                        clipped_geometries.append(geometry)
+                    else:
+                        # Если обрезка не удалась, используем оригинальную геометрию
+                        clipped_geometries.append(geometry)
+                
+                return clipped_geometries
+                
+        except Exception as e:
+            logger.error(f"Ошибка обрезки геометрий: {str(e)}")
+            return geometries  # В случае ошибки возвращаем оригинальные геометрии
+        finally:
+            conn.close()
+            
     @lru_cache(maxsize=1000)
     def _get_nearby_objects_cached(
             self, 
