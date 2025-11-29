@@ -179,7 +179,7 @@ def objects_in_polygon_simply():
         
         # ДИАГНОСТИКА: Собираем статистику ДО фильтрации
         total_objects_before = len(objects)
-        logger.debug(f"Объектов {total_objects_before}")
+        logger.debug(f"Объектов: {total_objects_before}")
         biological_objects_before = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
         biological_names_before = list(set(obj.get('name', 'Без имени') for obj in biological_objects_before))
         
@@ -1556,7 +1556,7 @@ def get_object_description():
                 count_info += f" (исключено {len(blacklisted_descriptions)} записей с риском blacklist)"
             if total_count > context_limit:
                 count_info += f" (в контекст включено топ-{context_limit} по релевантности)"
-            
+            logger.debug(context)
             context += count_info
             
             # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА
