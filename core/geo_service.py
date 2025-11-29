@@ -64,10 +64,20 @@ class GeoService:
         
         return list(canonical_names)
     
-    def clip_geometries_to_buffer(self, geometries: List[Dict], buffer_geometry: dict) -> List[Dict]:
+    def clip_geometries_to_buffer(self, geometries: List[Dict], buffer_geometry: dict, cache_key: str = None) -> List[Dict]:
         """
-        Обрезает полигоны по границе буферной зоны
+        Обрезает полигоны по границе буферной зоны с поддержкой кеширования
         """
+        # Если передан cache_key, проверяем кеш
+        if cache_key and redis_client:
+            try:
+                cached_result = redis_client.get(cache_key)
+                if cached_result:
+                    logger.info(f"Cache HIT for clipped geometries: {cache_key}")
+                    return json.loads(cached_result)
+            except Exception as e:
+                logger.warning(f"Redis GET error for clipped geometries {cache_key}: {e}")
+        
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cursor:
@@ -99,6 +109,14 @@ class GeoService:
                     else:
                         # Если обрезка не удалась, используем оригинальную геометрию
                         clipped_geometries.append(geometry)
+                
+                # Сохраняем в кеш, если передан ключ
+                if cache_key and redis_client:
+                    try:
+                        redis_client.setex(cache_key, 1800, json.dumps(clipped_geometries))  # 30 минут
+                        logger.info(f"Cache SET for clipped geometries: {cache_key}")
+                    except Exception as e:
+                        logger.warning(f"Redis SET error for clipped geometries {cache_key}: {e}")
                 
                 return clipped_geometries
                 
@@ -304,9 +322,9 @@ class GeoService:
                 LIMIT %(limit)s;
                 """
                 
-                logger.debug(f"Executing query with params: {params}")
+                #logger.debug(f"Executing query with params: {params}")
                 debug_query = cursor.mogrify(final_query, params).decode('utf-8')
-                logger.debug(f"Full SQL query:\n{debug_query}")
+                #logger.debug(f"Full SQL query:\n{debug_query}")
                 start_time = time.time()
                 cursor.execute(final_query, params)
                 execution_time = time.time() - start_time

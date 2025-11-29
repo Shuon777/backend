@@ -77,7 +77,7 @@ def objects_in_polygon_simply():
     object_subtype = data.get("object_subtype")
     limit = data.get("limit", 1500)
 
-    # Параметры для кеша
+    # Параметры для кеша основного запроса
     cache_params = {
         "name": name,
         "buffer_radius_km": buffer_radius_km,
@@ -95,7 +95,7 @@ def objects_in_polygon_simply():
         "steps": []
     }
 
-    # Проверяем кеш
+    # Проверяем кеш основного запроса
     cache_hit, cached_result = get_cached_result(redis_key, debug_info)
     if cache_hit:
         if debug_mode:
@@ -177,10 +177,11 @@ def objects_in_polygon_simply():
         objects = results.get("objects", [])
         answer = results.get("answer", "")
         
-        # ДОБАВЛЯЕМ: Если есть буферная зона, обрезаем полигоны
+        # ДОБАВЛЯЕМ: Кеширование обрезания полигонов
         if float(buffer_radius_km) > 0:
             try:
                 logger.info(f"🔪 Применена обрезка полигонов по буферной зоне {buffer_radius_km} км")
+                
                 # Создаем буферную зону для обрезки
                 buffer_geometry = search_service.geo_service.create_buffer_geometry(
                     polygon, 
@@ -188,10 +189,28 @@ def objects_in_polygon_simply():
                 )
                 
                 if buffer_geometry:
-                    # Обрезаем геометрии объектов
+                    # Создаем ключ для кеша обрезанных полигонов
+                    clip_cache_params = {
+                        "buffer_geometry": buffer_geometry,  # Используем саму геометрию для уникальности
+                        "objects_count": len(objects),
+                        "objects_hash": hashlib.md5(
+                            json.dumps([obj.get('id', '') for obj in objects], sort_keys=True).encode()
+                        ).hexdigest()[:8],
+                        "clip_version": "v1"
+                    }
+                    clip_cache_key = f"cache:clipped_polygons:{generate_cache_key(clip_cache_params)}"
+                    
+                    debug_info["clip_cache"] = {
+                        "key": clip_cache_key,
+                        "objects_count": len(objects),
+                        "buffer_radius_km": buffer_radius_km
+                    }
+                    
+                    # Обрезаем геометрии объектов с кешированием
                     clipped_objects = search_service.geo_service.clip_geometries_to_buffer(
                         objects, 
-                        buffer_geometry
+                        buffer_geometry,
+                        cache_key=clip_cache_key
                     )
                     
                     # Заменяем объекты на обрезанные
@@ -204,6 +223,7 @@ def objects_in_polygon_simply():
                         
             except Exception as e:
                 logger.error(f"Ошибка обрезки полигонов: {str(e)}")
+                debug_info["clip_error"] = str(e)
 
         objects = results.get("objects", [])
         answer = results.get("answer", "")
@@ -242,7 +262,7 @@ def objects_in_polygon_simply():
                     logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
         
         objects = safe_objects
-        logger.debug(objects)
+        #logger.debug(objects)
         # ДИАГНОСТИКА: Собираем статистику ПОСЛЕ фильтрации
         total_objects_after = len(objects)
         biological_objects_after = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
@@ -1983,6 +2003,7 @@ def get_species_description():
                 if isinstance(desc, dict):
                     logger.info(f"   - Описание {i}:")
                     logger.info(f"     * similarity: {desc.get('similarity')}")
+                    logger.info(f"     * object_name: {desc.get('object_name')}")
                     logger.info(f"     * has_content: {bool(desc.get('content'))}")
                     logger.info(f"     * content_length: {len(desc.get('content', ''))}")
                     logger.info(f"     * has_structured_data: {bool(desc.get('structured_data'))}")
@@ -2091,8 +2112,12 @@ def get_species_description():
                         similarity = round(float(similarity_val), 4)
                 except (ValueError, TypeError):
                     similarity = None
+            
+            # Получаем имя объекта из описания или используем переданное species_name
+            object_name = desc.get("object_name", species_name) if isinstance(desc, dict) else species_name
+            
             used_objects.append({
-                "name": species_name,
+                "name": object_name,
                 "type": "biological_entity",
                 "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
                 "similarity": similarity
@@ -2127,8 +2152,9 @@ def get_species_description():
             if filtered_descriptions:
                 used_objects = []
                 for desc in filtered_descriptions:
+                    object_name = desc.get("object_name", species_name) if isinstance(desc, dict) else species_name
                     used_objects.append({
-                        "name": species_name,
+                        "name": object_name,
                         "type": "biological_entity", 
                         "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
                         "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None
@@ -2147,33 +2173,105 @@ def get_species_description():
                 response["debug"] = debug_info
             return jsonify(response), 404
 
+        # ============================================================================
+        # ФОРМАТИРОВАНИЕ ОТВЕТА С ДОБАВЛЕНИЕМ ИМЕНИ ОБЪЕКТА В CONTENT
+        # ============================================================================
+        
+        def format_content_with_title(desc, index):
+            """Форматирует контент с добавлением заголовка в markdown формате"""
+            if isinstance(desc, dict):
+                content = desc.get("content", "")
+                object_name = desc.get("object_name", species_name)
+                
+                # Создаем заголовок в markdown формате
+                title_header = f"** {object_name} **\n\n"
+                
+                # Объединяем заголовок с контентом
+                formatted_content = title_header + content
+                return formatted_content
+            else:
+                # Для простых строк
+                return f"# {species_name}\n\n{desc}"
+        
         # Форматируем ответ в зависимости от параметров
         if include_similarity:
+            formatted_descriptions = []
+            for i, desc in enumerate(descriptions, 1):
+                if isinstance(desc, dict):
+                    formatted_desc = {
+                        "content": format_content_with_title(desc, i),
+                        "source": desc.get("source", "unknown"),
+                        "feature_data": desc.get("feature_data", {}),
+                        "object_name": desc.get("object_name", species_name),
+                        "object_type": "biological_entity",
+                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                    }
+                    
+                    # Добавляем structured_data если есть
+                    if desc.get("structured_data"):
+                        formatted_desc["structured_data"] = desc.get("structured_data")
+                    
+                    # Добавляем species_features если есть
+                    if desc.get("species_features"):
+                        formatted_desc["species_features"] = desc.get("species_features")
+                        
+                    formatted_descriptions.append(formatted_desc)
+                else:
+                    formatted_descriptions.append({
+                        "content": format_content_with_title(desc, i),
+                        "source": "content",
+                        "object_name": species_name,
+                        "object_type": "biological_entity"
+                    })
+            
             response_data = {
-                "count": len(descriptions),
-                "descriptions": descriptions,
+                "count": len(formatted_descriptions),
+                "descriptions": formatted_descriptions,
                 "query_used": query if query else "simple_search",
                 "similarity_threshold": similarity_threshold if query else None,
                 "use_gigachat_filter": use_gigachat_filter,
                 "in_stoplist_filter_applied": True,
                 "in_stoplist_level": in_stoplist,
-                # ДОБАВЛЯЕМ ОБЪЕКТЫ
                 "used_objects": used_objects,
                 "not_used_objects": not_used_objects
             }
         else:
+            formatted_descriptions = []
+            for i, desc in enumerate(descriptions, 1):
+                if isinstance(desc, dict):
+                    formatted_desc = {
+                        "content": format_content_with_title(desc, i),
+                        "source": desc.get("source", "unknown"),
+                        "feature_data": desc.get("feature_data", {}),
+                        "object_name": desc.get("object_name", species_name),
+                        "object_type": "biological_entity"
+                    }
+                    
+                    # Добавляем structured_data если есть
+                    if desc.get("structured_data"):
+                        formatted_desc["structured_data"] = desc.get("structured_data")
+                    
+                    # Добавляем species_features если есть
+                    if desc.get("species_features"):
+                        formatted_desc["species_features"] = desc.get("species_features")
+                        
+                    formatted_descriptions.append(formatted_desc)
+                else:
+                    formatted_descriptions.append({
+                        "content": format_content_with_title(desc, i),
+                        "source": "content",
+                        "object_name": species_name,
+                        "object_type": "biological_entity"
+                    })
+            
             response_data = {
-                "count": len(descriptions),
-                "descriptions": [{"content": desc["content"] if isinstance(desc, dict) else desc,
-                                "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
-                                "feature_data": desc.get("feature_data", {}) if isinstance(desc, dict) else {}} 
-                               for desc in descriptions],
+                "count": len(formatted_descriptions),
+                "descriptions": formatted_descriptions,
                 "query_used": query if query else "simple_search",
                 "similarity_threshold": similarity_threshold if query else None,
                 "use_gigachat_filter": use_gigachat_filter,
                 "in_stoplist_filter_applied": True,
                 "in_stoplist_level": in_stoplist,
-                # ДОБАВЛЯЕМ ОБЪЕКТЫ
                 "used_objects": used_objects,
                 "not_used_objects": not_used_objects
             }
@@ -2182,7 +2280,7 @@ def get_species_description():
         if debug_mode:
             response_data["debug"] = debug_info
 
-        logger.info(f"✅ УСПЕШНЫЙ ОТВЕТ для '{species_name}': {len(descriptions)} описаний")
+        logger.info(f"✅ УСПЕШНЫЙ ОТВЕТ для '{species_name}': {len(formatted_descriptions)} описаний")
         return jsonify(response_data)
         
     except Exception as e:
@@ -2196,7 +2294,7 @@ def get_species_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-    
+     
 @app.route("/get_coords", methods=["POST"])
 def api_get_coords():
     data = request.get_json()

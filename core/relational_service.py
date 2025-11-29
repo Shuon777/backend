@@ -1510,8 +1510,8 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cursor:
-                logger.debug(f"Executing SQL: {sql_query}")
-                logger.debug(f"With params: {params}")
+                #logger.debug(f"Executing SQL: {sql_query}")
+                #logger.debug(f"With params: {params}")
                 
                 if params:
                     cursor.execute(sql_query, params)

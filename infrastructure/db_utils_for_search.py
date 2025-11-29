@@ -42,21 +42,34 @@ class Slot_validator:
         conn = psycopg2.connect(**self.db_config)
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Запрос для получения текущей "страницы" результатов
+        # ИСПРАВЛЕННЫЙ запрос - ищем в biological_entity по русским и научным названиям
         query = """
-        SELECT DISTINCT title FROM text_content
+        SELECT DISTINCT be.common_name_ru as title 
+        FROM biological_entity be
+        JOIN entity_relation er ON be.id = er.target_id 
+            AND er.target_type = 'biological_entity'
+            AND er.relation_type = 'описание объекта'
+        JOIN text_content tc ON tc.id = er.source_id 
+            AND er.source_type = 'text_content'
         WHERE 
-            title ~* %s
-            AND (content IS NOT NULL AND content != '' OR structured_data IS NOT NULL AND structured_data::text != '{}'::text)
+            (be.common_name_ru ~* %s OR be.scientific_name ~* %s)
+            AND (tc.content IS NOT NULL AND tc.content != '' OR tc.structured_data IS NOT NULL AND tc.structured_data::text != '{}'::text)
         ORDER BY title
         LIMIT %s OFFSET %s;
         """
         
-        # Запрос для проверки, есть ли еще результаты (проверяем наличие хотя бы одной записи после текущего offset+limit)
+        # Запрос для проверки, есть ли еще результаты
         check_more_query = """
-        SELECT 1 FROM text_content
-        WHERE title ~* %s
-        AND (content IS NOT NULL AND content != '' OR structured_data IS NOT NULL AND structured_data::text != '{}'::text)
+        SELECT 1 
+        FROM biological_entity be
+        JOIN entity_relation er ON be.id = er.target_id 
+            AND er.target_type = 'biological_entity'
+            AND er.relation_type = 'описание объекта'
+        JOIN text_content tc ON tc.id = er.source_id 
+            AND er.source_type = 'text_content'
+        WHERE 
+            (be.common_name_ru ~* %s OR be.scientific_name ~* %s)
+            AND (tc.content IS NOT NULL AND tc.content != '' OR tc.structured_data IS NOT NULL AND tc.structured_data::text != '{}'::text)
         OFFSET %s LIMIT 1;
         """
 
@@ -64,20 +77,23 @@ class Slot_validator:
             search_pattern = rf'\y{object_name.lower()}\y'
             
             # Выполняем основной запрос
-            cursor.execute(query, (search_pattern, limit, offset))
+            cursor.execute(query, (search_pattern, search_pattern, limit, offset))
             results = cursor.fetchall()
             matches = [row['title'] for row in results]
 
             # Выполняем запрос для проверки наличия следующих страниц
-            cursor.execute(check_more_query, (search_pattern, offset + limit))
+            cursor.execute(check_more_query, (search_pattern, search_pattern, offset + limit))
             has_more = cursor.fetchone() is not None
 
+            # СОХРАНЯЕМ ОРИГИНАЛЬНУЮ ЛОГИКУ СТАТУСОВ
             if not matches:
                 return {"status": "not_found", "matches": [], "has_more": False}
             elif len(matches) == 1:
-                return {"status": "found", "matches": matches, "has_more": False}
+                return {"status": "found", "matches": matches, "has_more": has_more}
             else:
                 return {"status": "ambiguous", "matches": matches, "has_more": has_more}
 
+        except Exception as e:
+            return {"status": "error", "message": str(e), "matches": []}
         finally:
             conn.close()
