@@ -12,6 +12,7 @@ from flask_cors import CORS
 from http.client import HTTPException
 from shapely.geometry import shape
 
+import hashlib
 from core.coordinates_finder import GeoProcessor
 from core.relational_service import RelationalService
 from core.search_service import SearchService
@@ -189,28 +190,11 @@ def objects_in_polygon_simply():
                 )
                 
                 if buffer_geometry:
-                    # Создаем ключ для кеша обрезанных полигонов
-                    clip_cache_params = {
-                        "buffer_geometry": buffer_geometry,  # Используем саму геометрию для уникальности
-                        "objects_count": len(objects),
-                        "objects_hash": hashlib.md5(
-                            json.dumps([obj.get('id', '') for obj in objects], sort_keys=True).encode()
-                        ).hexdigest()[:8],
-                        "clip_version": "v1"
-                    }
-                    clip_cache_key = f"cache:clipped_polygons:{generate_cache_key(clip_cache_params)}"
-                    
-                    debug_info["clip_cache"] = {
-                        "key": clip_cache_key,
-                        "objects_count": len(objects),
-                        "buffer_radius_km": buffer_radius_km
-                    }
                     
                     # Обрезаем геометрии объектов с кешированием
                     clipped_objects = search_service.geo_service.clip_geometries_to_buffer(
                         objects, 
-                        buffer_geometry,
-                        cache_key=clip_cache_key
+                        buffer_geometry
                     )
                     
                     # Заменяем объекты на обрезанные

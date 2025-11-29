@@ -295,17 +295,18 @@ class RelationalService:
     def get_text_descriptions(self, species_name: str) -> List[str]:
         """Получает все текстовые описания по названию вида"""
         query = """
-        SELECT tc.content, tc.structured_data
-        FROM biological_entity be
-        JOIN entity_relation er ON be.id = er.target_id 
-            AND er.target_type = 'biological_entity'
-            AND er.relation_type = 'описание объекта'
-        JOIN text_content tc ON tc.id = er.source_id 
-            AND er.source_type = 'text_content'
-        WHERE be.common_name_ru ILIKE %s;
-        """
+SELECT tc.content, tc.structured_data
+FROM biological_entity be
+JOIN entity_relation er ON be.id = er.target_id 
+    AND er.target_type = 'biological_entity'
+    AND er.relation_type = 'описание объекта'
+JOIN text_content tc ON tc.id = er.source_id 
+    AND er.source_type = 'text_content'
+WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
+"""
         try:
-            results = self.execute_query(query, (f'%{species_name}%',))
+            pattern = r'\y' + re.escape(species_name) + r'\y'
+            results = self.execute_query(query, (pattern,))
             descriptions = []
             
             for row in results:
@@ -509,7 +510,7 @@ class RelationalService:
                         "be.feature_data->'location_info'->>'exact_location' ~ %(exact_location_pattern)s"
                     )
                     # Создаем паттерн для точного поиска слова
-                    params['exact_location_pattern'] = r'\y' + re.escape(exact_location) + r'\y'
+                    params['exact_location_pattern'] = r'(^|[\s,."])' + re.escape(exact_location) + r'([\s,."]|$)'
             
             # Точный поиск по region - слово целиком
             if 'region' in location_info and location_info['region']:
@@ -600,8 +601,8 @@ class RelationalService:
         logger.debug(f"Выполняется поиск по фильтрам для типа: '{object_type}'")
         if object_name:
             logger.debug(f"🔍 ТОЧНЫЙ ПОИСК по названию: '{object_name}'")
-        logger.debug(f"SQL запрос: {formatted_query}")
-        logger.debug(f"Параметры: {params}")
+        #logger.debug(f"SQL запрос: {formatted_query}")
+        #logger.debug(f"Параметры: {params}")
         
         try:
             results = self.execute_query(formatted_query, params)
@@ -803,8 +804,8 @@ class RelationalService:
             }
             
             # <-- ВАЖНО: Логируем сам запрос и параметры перед выполнением
-            logger.debug(f"Сформированный SQL-запрос:\n{formatted_query}")
-            logger.debug(f"Параметры запроса: {params}")
+            #logger.debug(f"Сформированный SQL-запрос:\n{formatted_query}")
+            #logger.debug(f"Параметры запроса: {params}")
             results = self.execute_query(formatted_query, params)
             
             if not results:
@@ -848,15 +849,20 @@ class RelationalService:
     def get_text_descriptions_with_filters(self, species_name: str, in_stoplist: str = "1") -> List[Dict]:
         """Получает текстовые описания с учетом in_stoplist"""
         query = """
-        SELECT tc.content, tc.structured_data, tc.feature_data
-        FROM biological_entity be
-        JOIN entity_relation er ON be.id = er.target_id 
-            AND er.target_type = 'biological_entity'
-            AND er.relation_type = 'описание объекта'
-        JOIN text_content tc ON tc.id = er.source_id 
-            AND er.source_type = 'text_content'
-        WHERE be.common_name_ru ILIKE %s
-        """
+    SELECT 
+        tc.content, 
+        tc.structured_data, 
+        tc.feature_data,
+        be.common_name_ru as object_name,  -- ДОБАВЛЯЕМ имя объекта
+        be.feature_data as species_features  -- ДОБАВЛЯЕМ фичи объекта
+    FROM biological_entity be
+    JOIN entity_relation er ON be.id = er.target_id 
+        AND er.target_type = 'biological_entity'
+        AND er.relation_type = 'описание объекта'
+    JOIN text_content tc ON tc.id = er.source_id 
+        AND er.source_type = 'text_content'
+    WHERE be.common_name_ru ILIKE %s
+    """
         
         # Гибкая фильтрация по in_stoplist
         try:
@@ -881,6 +887,8 @@ class RelationalService:
                 content = row['content']
                 structured_data = row.get('structured_data')
                 feature_data = row.get('feature_data', {})
+                object_name = row.get('object_name')  # Имя из БД
+                species_features = row.get('species_features', {})  # Фичи вида
                 
                 if not content and structured_data:
                     extracted_content = self._extract_content_from_structured_data(structured_data)
@@ -888,13 +896,19 @@ class RelationalService:
                         descriptions.append({
                             "content": extracted_content,
                             "source": "structured_data",
-                            "feature_data": feature_data
+                            "feature_data": feature_data,
+                            "object_name": object_name,  # ДОБАВЛЯЕМ
+                            "species_features": species_features,  # ДОБАВЛЯЕМ
+                            "object_type": "biological_entity"  # ДОБАВЛЯЕМ
                         })
                 elif content:
                     descriptions.append({
                         "content": content,
                         "source": "content", 
-                        "feature_data": feature_data
+                        "feature_data": feature_data,
+                        "object_name": object_name,  # ДОБАВЛЯЕМ
+                        "species_features": species_features,  # ДОБАВЛЯЕМ
+                        "object_type": "biological_entity"  # ДОБАВЛЯЕМ
                     })
                     
             return descriptions
@@ -908,17 +922,22 @@ class RelationalService:
                                in_stoplist: str = "1") -> List[Dict]:
         """Получает текстовые описания с учетом схожести эмбеддингов и in_stoplist"""
         query = """
-        SELECT tc.content, tc.structured_data, tc.feature_data, 
-            1 - (tc.embedding <=> %s::vector) as similarity
-        FROM biological_entity be
-        JOIN entity_relation er ON be.id = er.target_id 
-            AND er.target_type = 'biological_entity'
-            AND er.relation_type = 'описание объекта'
-        JOIN text_content tc ON tc.id = er.source_id 
-            AND er.source_type = 'text_content'
-        WHERE be.common_name_ru ILIKE %s
-        AND 1 - (tc.embedding <=> %s::vector) > %s
-        """
+SELECT 
+    tc.content, 
+    tc.structured_data, 
+    tc.feature_data, 
+    1 - (tc.embedding <=> %s::vector) as similarity,
+    be.common_name_ru as object_name,
+    be.feature_data as species_features
+FROM biological_entity be
+JOIN entity_relation er ON be.id = er.target_id 
+    AND er.target_type = 'biological_entity'
+    AND er.relation_type = 'описание объекта'
+JOIN text_content tc ON tc.id = er.source_id 
+    AND er.source_type = 'text_content'
+WHERE be.common_name_ru ~* %s  -- Регулярное выражение вместо ILIKE
+AND 1 - (tc.embedding <=> %s::vector) > %s
+"""
         logger.info(f"🔍 ВЫПОЛНЯЕТСЯ ВЕКТОРНЫЙ ПОИСК:")
         logger.info(f"   - species_name: {species_name}")
         logger.info(f"   - similarity_threshold: {similarity_threshold}")
@@ -943,9 +962,10 @@ class RelationalService:
         try:
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
             
+            pattern = r'\y' + re.escape(species_name) + r'\y'  # Точное совпадение слова
             results = self.execute_query(
                 query, 
-                (embedding_str, f'%{species_name}%', embedding_str, similarity_threshold, limit)
+                (embedding_str, pattern, embedding_str, similarity_threshold, limit)
             )
             
             if not results:
@@ -958,6 +978,8 @@ class RelationalService:
                     structured_data = row.get('structured_data')
                     similarity = row.get('similarity')
                     feature_data = row.get('feature_data', {})
+                    object_name = row.get('object_name')  # Имя из БД
+                    species_features = row.get('species_features', {})  # Фичи вида
                     
                     # ФИКС: Проверяем similarity на валидность
                     if similarity is not None:
@@ -988,7 +1010,10 @@ class RelationalService:
                         item = {
                             "content": final_content,
                             "source": "structured_data" if not content and structured_data else "content",
-                            "feature_data": feature_data
+                            "feature_data": feature_data,
+                            "object_name": object_name,  
+                            "species_features": species_features, 
+                            "object_type": "biological_entity"  # ДОБАВЛЯЕМ тип
                         }
                         # Добавляем similarity только если оно валидно
                         if similarity_value is not None:

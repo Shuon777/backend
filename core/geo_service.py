@@ -7,6 +7,7 @@ from typing import List, Dict,Optional,Union,Tuple
 import json
 import time
 from functools import lru_cache
+from utils import get_cached_result, set_cached_result
 load_dotenv()
 
 logging.basicConfig(
@@ -69,14 +70,12 @@ class GeoService:
         Обрезает полигоны по границе буферной зоны с поддержкой кеширования
         """
         # Если передан cache_key, проверяем кеш
-        if cache_key and redis_client:
-            try:
-                cached_result = redis_client.get(cache_key)
-                if cached_result:
-                    logger.info(f"Cache HIT for clipped geometries: {cache_key}")
-                    return json.loads(cached_result)
-            except Exception as e:
-                logger.warning(f"Redis GET error for clipped geometries {cache_key}: {e}")
+        if cache_key:
+            debug_info = {"cache_check": True}
+            cache_hit, cached_result = get_cached_result(cache_key, debug_info)
+            if cache_hit:
+                logger.info(f"Cache HIT for clipped geometries: {cache_key}")
+                return cached_result
         
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
@@ -103,26 +102,21 @@ class GeoService:
                     result = cursor.fetchone()
                     
                     if result and result['clipped_geojson']:
-                        # Используем обрезанную геометрию
                         geometry['geojson'] = result['clipped_geojson']
                         clipped_geometries.append(geometry)
                     else:
-                        # Если обрезка не удалась, используем оригинальную геометрию
                         clipped_geometries.append(geometry)
                 
-                # Сохраняем в кеш, если передан ключ
-                if cache_key and redis_client:
-                    try:
-                        redis_client.setex(cache_key, 1800, json.dumps(clipped_geometries))  # 30 минут
-                        logger.info(f"Cache SET for clipped geometries: {cache_key}")
-                    except Exception as e:
-                        logger.warning(f"Redis SET error for clipped geometries {cache_key}: {e}")
+                # Сохраняем в кеш
+                if cache_key:
+                    set_cached_result(cache_key, clipped_geometries, expire_time=1800)
+                    logger.info(f"Cache SET for clipped geometries: {cache_key}")
                 
                 return clipped_geometries
                 
         except Exception as e:
             logger.error(f"Ошибка обрезки геометрий: {str(e)}")
-            return geometries  # В случае ошибки возвращаем оригинальные геометрии
+            return geometries
         finally:
             conn.close()
             
