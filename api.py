@@ -114,20 +114,19 @@ def objects_in_polygon_simply():
     
     # Проверяем синонимы перед поиском геометрии
     try:
-        synonyms_data = search_service.get_synonyms_for_name(name)
-        
-        if "error" not in synonyms_data:
-            main_names = list(synonyms_data.keys())
-            if main_names:
-                canonical_name = main_names[0]
-                logger.debug(f"Найден синоним: '{name}' -> '{canonical_name}'")
-                name = canonical_name
-                debug_info["steps"].append({
-                    "step": "synonym_resolution",
-                    "original_name": data.get("name"),
-                    "canonical_name": canonical_name,
-                    "synonyms_data": synonyms_data
-                })
+        resolved_info = search_service.resolve_object_synonym(name, "all")
+
+        if resolved_info.get("resolved", False):
+            canonical_name = resolved_info["main_form"]
+            logger.debug(f"Найден синоним: '{name}' -> '{canonical_name}' (тип: {resolved_info['object_type']})")
+            name = canonical_name
+            debug_info["steps"].append({
+                "step": "universal_synonym_resolution", 
+                "original_name": data.get("name"),
+                "canonical_name": canonical_name,
+                "object_type": resolved_info["object_type"],
+                "resolved_info": resolved_info
+            })
     except Exception as e:
         logger.warning(f"Ошибка при проверке синонимов для '{name}': {e}")
         debug_info["steps"].append({
@@ -147,6 +146,7 @@ def objects_in_polygon_simply():
                 "original_name": name
             })
         else:
+            logger.debug(f"Геометрия для '{name}' не найдена")
             response = {"error": f"Геометрия для '{name}' не найдена"}
             if debug_mode:
                 response["debug"] = debug_info
@@ -173,12 +173,13 @@ def objects_in_polygon_simply():
             object_subtype=object_subtype,
             limit=int(limit)
         )
-        
+
         objects = results.get("objects", [])
         answer = results.get("answer", "")
         
         # ДИАГНОСТИКА: Собираем статистику ДО фильтрации
         total_objects_before = len(objects)
+        logger.debug(f"Объектов {total_objects_before}")
         biological_objects_before = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
         biological_names_before = list(set(obj.get('name', 'Без имени') for obj in biological_objects_before))
         
@@ -274,8 +275,6 @@ def objects_in_polygon_simply():
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response)
 
-    # ... (around line 250 in api.py)
-
     # Группируем объекты по геометрии и типу
     grouped_by_geojson = {}
     for obj in objects:
@@ -298,11 +297,11 @@ def objects_in_polygon_simply():
         if object_name not in grouped_by_geojson[geojson_key]['biological_names']:
             grouped_by_geojson[geojson_key]['biological_names'].append(object_name)
 
-    # ... существующий код группировки ...
-
-    # Формируем объекты для карты
+    # Формируем объекты для карты с красивым скроллбаром
     objects_for_map = []
     MAX_NAMES_IN_TOOLTIP = 3
+    MAX_VISIBLE_ITEMS = 8  # Показывать скролл после 8 элементов
+    MAX_POPUP_HEIGHT = "300px"  # Комфортная высота для большинства экранов
 
     # Собираем информацию об объектах для фронтенда
     used_objects = []
@@ -315,7 +314,7 @@ def objects_in_polygon_simply():
         
         # Добавляем объекты в used_objects с названием геообъекта
         used_objects.append({
-            "name": location_name,  # Используем название геообъекта
+            "name": location_name,
             "type": obj_type
         })
         
@@ -325,28 +324,111 @@ def objects_in_polygon_simply():
         else:
             tooltip_text = f"{location_name}: {', '.join(biological_names)}"
 
-        # Создаем красивый HTML для Popup с названием географического объекта
-        popup_html = f"<h5>{location_name}</h5>"
-        
+        # Создаем красивый HTML для Popup с кастомным скроллбаром
+        popup_html = f"""
+        <div style="max-width: 320px; font-family: Arial, sans-serif;">
+            <h5 style="
+                margin: 0 0 12px 0; 
+                padding: 0; 
+                color: #2c3e50; 
+                border-bottom: 2px solid #3498db; 
+                padding-bottom: 8px;
+                font-size: 16px;
+            ">{location_name}</h5>
+        """
+
         if obj_type == "biological_entity":
-            popup_html += f"<h6>Обнаружено видов: {len(biological_names)}</h6>"
+            popup_html += f'''
+            <div style="
+                font-size: 13px; 
+                color: #7f8c8d; 
+                margin-bottom: 12px;
+                padding: 5px;
+                background: #ecf0f1;
+                border-radius: 4px;
+            ">
+                🐾 Обнаружено видов: <strong>{len(biological_names)}</strong>
+            </div>
+            '''
         else:
-            popup_html += f"<h6>Обнаружено объектов: {len(biological_names)}</h6>"
-        
-        popup_html += '<ul style="padding-left: 20px; margin-top: 5px;">'
-        for biological_name in biological_names:
-            popup_html += f"<li>{biological_name}</li>"
-        popup_html += "</ul>"
+            popup_html += f'''
+            <div style="
+                font-size: 13px; 
+                color: #7f8c8d; 
+                margin-bottom: 12px;
+                padding: 5px;
+                background: #ecf0f1;
+                border-radius: 4px;
+            ">
+                📍 Обнаружено объектов: <strong>{len(biological_names)}</strong>
+            </div>
+            '''
+
+        # Контейнер списка с кастомным скроллбаром
+        popup_html += f'''
+        <div style="
+            max-height: {MAX_POPUP_HEIGHT};
+            overflow-y: auto;
+            border: 1px solid #bdc3c7;
+            border-radius: 6px;
+            padding: 8px;
+            background: #f8f9fa;
+        ">
+            <ul style="
+                list-style: none;
+                padding: 0;
+                margin: 0;
+            ">
+        '''
+
+        for i, biological_name in enumerate(biological_names):
+            # Чередование цветов фона для лучшей читаемости
+            bg_color = "#ffffff" if i % 2 == 0 else "#f8f9fa"
+            
+            popup_html += f'''
+            <li style="
+                padding: 8px 10px;
+                margin: 3px 0;
+                background: {bg_color};
+                border-left: 4px solid #3498db;
+                border-radius: 4px;
+                font-size: 13px;
+                transition: all 0.2s ease;
+            ">{biological_name}</li>
+            '''
+
+        popup_html += "</ul></div>"
+
+        # Стили для кастомного скроллбара
+        popup_html += """
+        <style>
+            div::-webkit-scrollbar {
+                width: 8px;
+            }
+            div::-webkit-scrollbar-track {
+                background: #f1f1f1;
+                border-radius: 4px;
+            }
+            div::-webkit-scrollbar-thumb {
+                background: #c1c1c1;
+                border-radius: 4px;
+            }
+            div::-webkit-scrollbar-thumb:hover {
+                background: #a8a8a8;
+            }
+            li:hover {
+                background: #e3f2fd !important;
+                transform: translateX(2px);
+            }
+        </style>
+        </div>
+        """
         
         objects_for_map.append({
             'tooltip': tooltip_text,
             'popup': popup_html,
             'geojson': group_data['geojson']
         })
-
-    # ... остальной код ...
-
-    # ... (rest of the code)
 
     try:
         # Создаем карту
@@ -375,7 +457,8 @@ def objects_in_polygon_simply():
                 "map_name": map_name,
                 "objects_count": len(objects_for_map),
                 "biological_names_count": len(all_biological_names),
-                "biological_names_list": all_biological_names  # Для отладки
+                "biological_names_list": all_biological_names,  # Для отладки
+                "popup_style": "custom_scrollbar_v2"
             }
             map_result["debug"] = debug_info
 
@@ -399,7 +482,7 @@ def objects_in_polygon_simply():
             response["in_stoplist_filter_applied"] = True
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response), 500
-     
+    
 @app.route("/objects_in_area_by_type", methods=["POST"])
 def objects_in_area_by_type():
     data = request.get_json()
