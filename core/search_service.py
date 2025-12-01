@@ -12,6 +12,7 @@ from infrastructure.llm_integration import get_gigachat
 from .geo_service import GeoService
 import time
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from shapely.geometry import shape, mapping
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -799,9 +800,28 @@ class SearchService:
 ) -> Dict[str, Any]:
         """Поиск объектов внутри полигона и в буферной зоне с поддержкой подтипов"""
         try:
+            # === ОПТИМИЗАЦИЯ НАЧАЛО ===
+            # Упрощаем полигон перед отправкой в БД.
+            # Для больших объектов (как Байкал) это критически важно для производительности ST_DWithin/ST_Distance.
+            try:
+                original_shape = shape(polygon_geojson)
+                # tolerance=0.001 градуса (~111 метров). Это сохраняет форму, но убирает лишние детали береговой линии.
+                # Для поиска объектов в масштабах озера этого более чем достаточно.
+                simplified_shape = original_shape.simplify(0.001, preserve_topology=True)
+                optimized_polygon_geojson = mapping(simplified_shape)
+                
+                # Логируем степень сжатия для отладки
+                orig_coords = str(polygon_geojson)[:100]
+                simp_coords = str(optimized_polygon_geojson)[:100]
+                logger.info(f"📐 Полигон оптимизирован для поиска.")
+            except Exception as e:
+                logger.warning(f"Не удалось упростить полигон, используем оригинал: {e}")
+                optimized_polygon_geojson = polygon_geojson
+            # === ОПТИМИЗАЦИЯ КОНЕЦ ===
+
             # Получаем полную информацию об объектах с названиями геообъектов
             results = self.geo_service.get_objects_in_polygon(
-                polygon_geojson=polygon_geojson,
+                polygon_geojson=optimized_polygon_geojson, # Передаем упрощенный полигон
                 buffer_radius_km=buffer_radius_km,
                 object_type=object_type,
                 object_subtype=object_subtype,
@@ -811,9 +831,9 @@ class SearchService:
             # ЕСЛИ ЕСТЬ БУФЕРНАЯ ЗОНА - ОБРЕЗАЕМ ПОЛИГОНЫ
             if buffer_radius_km > 0:
                 try:
-                    # Создаем буферную зону для обрезки
+                    # Создаем буферную зону для обрезки (используем оптимизированный полигон для скорости)
                     buffer_geometry = self.geo_service.create_buffer_geometry(
-                        polygon_geojson, 
+                        optimized_polygon_geojson, 
                         buffer_radius_km
                     )
                     
@@ -832,7 +852,7 @@ class SearchService:
                 return {
                     "answer": "В указанной области не найдено объектов",
                     "objects": [],
-                    "polygon": polygon_geojson,
+                    "polygon": polygon_geojson, # Возвращаем оригинальный полигон для отображения на карте
                     "biological_objects": ""
                 }
             
@@ -862,8 +882,6 @@ class SearchService:
                 
                 formatted_results.append(formatted_obj)
             
-            # ... остальной код без изменений ...
-            
             
             total_count = len(results)
             type_summary = ", ".join([f"{count} {type_name}" for type_name, count in type_counts.items()])
@@ -880,7 +898,7 @@ class SearchService:
             return {
                 "answer": answer,
                 "objects": formatted_results,
-                "polygon": polygon_geojson,
+                "polygon": polygon_geojson, # Возвращаем оригинальный полигон (красивый) для фронтенда
                 "biological_objects": biological_objects_str 
             }
             

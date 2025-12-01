@@ -88,15 +88,13 @@ def objects_in_polygon_simply():
         "in_stoplist": in_stoplist,
         "version": "v2"
     }
-    
     redis_key = f"cache:polygon_simply:{generate_cache_key(cache_params)}"
     debug_info = {
         "timestamp": time.time(),
         "cache_key": redis_key,
         "steps": []
     }
-
-    # Проверяем кеш основного запроса
+    
     cache_hit, cached_result = get_cached_result(redis_key, debug_info)
     if cache_hit:
         if debug_mode:
@@ -178,43 +176,11 @@ def objects_in_polygon_simply():
         objects = results.get("objects", [])
         answer = results.get("answer", "")
         
-        # ДОБАВЛЯЕМ: Кеширование обрезания полигонов
-        if float(buffer_radius_km) > 0:
-            try:
-                logger.info(f"🔪 Применена обрезка полигонов по буферной зоне {buffer_radius_km} км")
-                
-                # Создаем буферную зону для обрезки
-                buffer_geometry = search_service.geo_service.create_buffer_geometry(
-                    polygon, 
-                    float(buffer_radius_km)
-                )
-                
-                if buffer_geometry:
-                    
-                    # Обрезаем геометрии объектов с кешированием
-                    clipped_objects = search_service.geo_service.clip_geometries_to_buffer(
-                        objects, 
-                        buffer_geometry
-                    )
-                    
-                    # Заменяем объекты на обрезанные
-                    objects = clipped_objects
-                    logger.info(f"✅ Полигоны обрезаны. Осталось объектов: {len(objects)}")
-                    
-                    # Обновляем ответ
-                    if 'обрезаны' not in answer.lower():
-                        answer = f"{answer} (полигоны обрезаны по буферной зоне)"
-                        
-            except Exception as e:
-                logger.error(f"Ошибка обрезки полигонов: {str(e)}")
-                debug_info["clip_error"] = str(e)
-
-        objects = results.get("objects", [])
-        answer = results.get("answer", "")
+        # [СЧЕТЧИК 1] Всего найдено в БД (сырые данные)
+        count_raw_from_db = len(objects)
         
         # ДИАГНОСТИКА: Собираем статистику ДО фильтрации
         total_objects_before = len(objects)
-        logger.debug(f"Объектов: {total_objects_before}")
         biological_objects_before = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
         biological_names_before = list(set(obj.get('name', 'Без имени') for obj in biological_objects_before))
         
@@ -237,16 +203,19 @@ def objects_in_polygon_simply():
                     safe_objects.append(obj)
                 else:
                     stoplisted_objects.append(obj)
-                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+                    # logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
             except (ValueError, TypeError):
                 if obj_in_stoplist is None or int(obj_in_stoplist) <= 1:
                     safe_objects.append(obj)
                 else:
                     stoplisted_objects.append(obj)
-                    logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
+                    # logger.info(f"Исключен объект с in_stoplist={obj_in_stoplist}: {obj.get('name', 'Без имени')}")
         
         objects = safe_objects
-        #logger.debug(objects)
+        
+        # [СЧЕТЧИК 2] Осталось после фильтра безопасности
+        count_safe_after_filter = len(objects)
+
         # ДИАГНОСТИКА: Собираем статистику ПОСЛЕ фильтрации
         total_objects_after = len(objects)
         biological_objects_after = [obj for obj in objects if obj.get('type') in ['Объект флоры','Объект фауны']]
@@ -312,8 +281,15 @@ def objects_in_polygon_simply():
 
     # Группируем объекты по геометрии и типу
     grouped_by_geojson = {}
+    
+    # [СЧЕТЧИКИ ДИАГНОСТИКИ ГРУППИРОВКИ]
+    count_missing_geo = 0       # Нет координат в JSON
+    count_duplicates_in_point = 0 # Одинаковое имя в одной точке (схлопнуто)
+    count_total_in_popups = 0   # Реально попало в списки попапов (уникальные имена в точках)
+    
     for obj in objects:
         if 'geojson' not in obj or not obj['geojson']:
+            count_missing_geo += 1
             continue
         geojson_key = json.dumps(obj['geojson'], sort_keys=True)
         obj_type = obj.get('type', 'unknown')
@@ -328,10 +304,39 @@ def objects_in_polygon_simply():
                 'location_name': location_name,  # Сохраняем название геообъекта
                 'biological_names': []           # Переименовываем для ясности
             }
+        
         object_name = obj.get('name', 'Без имени')
+        
+        # Логика подсчета того, что попадет в попап
         if object_name not in grouped_by_geojson[geojson_key]['biological_names']:
             grouped_by_geojson[geojson_key]['biological_names'].append(object_name)
+            count_total_in_popups += 1
+        else:
+            count_duplicates_in_point += 1
 
+    # [ЛОГИРОВАНИЕ ИТОГОВОЙ СТАТИСТИКИ]
+    logger.debug(
+        f"📊 STATISTICS: "
+        f"RawDB={count_raw_from_db} | "
+        f"Filtered={count_safe_after_filter} | "
+        f"NoGeo={count_missing_geo} | "
+        f"Dupes(Hidden)={count_duplicates_in_point} | "
+        f"VisibleInPopups={count_total_in_popups} | "
+        f"UniqueMapMarkers={len(grouped_by_geojson)}"
+    )
+    logger.debug("📍 MARKER CONTENT BREAKDOWN:")
+    for geo_key, group in grouped_by_geojson.items():
+        count = len(group['biological_names'])
+        # Определяем тип геометрии (Point или Polygon)
+        g_type = group['geojson'].get('type', 'Unknown')
+        name = group.get('location_name', 'Unknown')
+        # Выводим только если там много объектов, чтобы не спамить
+        if count > 10:
+            logger.debug(f"   🚩 {g_type} at '{name}': contains {count} items")
+        else:
+            # Для мелких можно кратко
+            pass # или logger.debug(f"   🔹 {g_type} at '{name}': {count}")
+        
     # Формируем объекты для карты с красивым скроллбаром
     objects_for_map = []
     MAX_NAMES_IN_TOOLTIP = 3
@@ -465,12 +470,45 @@ def objects_in_polygon_simply():
             'geojson': group_data['geojson']
         })
 
+    # =========================================================================
+    # [FIX] СОРТИРОВКА ПО ПЛОЩАДИ: Большие полигоны вниз, маленькие и точки наверх
+    # =========================================================================
+    try:
+        def get_sort_key(item):
+            """
+            Возвращает площадь для сортировки. 
+            Точки и Линии (площадь 0) получают приоритет -1, чтобы быть в конце списка (наверху).
+            Полигоны сортируются по убыванию площади (сначала большие, потом маленькие).
+            """
+            try:
+                geom = shape(item['geojson'])
+                area = geom.area
+                # Если площадь 0 (точка или линия) или очень маленькая
+                if area == 0 or geom.geom_type in ['Point', 'MultiPoint', 'LineString', 'MultiLineString']:
+                    return -1 
+                return area
+            except:
+                return 0
+
+        # Сортируем: 
+        # reverse=True -> Сначала большие числа (большая площадь), в конце маленькие/-1.
+        # Порядок отрисовки: Элемент[0] (Дно) -> ... -> Элемент[N] (Верх)
+        objects_for_map.sort(key=get_sort_key, reverse=True)
+        
+        logger.debug(f"📐 Objects sorted by area for correct Z-indexing. Count: {len(objects_for_map)}")
+    except Exception as e:
+        logger.warning(f"Ошибка при сортировке геометрий: {e}")
+    # =========================================================================
+
     try:
         # Создаем карту
         map_name = redis_key.replace("cache:", "map_").replace(":", "_")
         map_result = geo.draw_custom_geometries(objects_for_map, map_name)
         
-        map_result["count"] = len(objects_for_map)
+        # ВАЖНО: Возвращаем число объектов ПОСЛЕ фильтрации безопасности, 
+        # о которых мы говорим пользователю (даже если они визуально схлопнулись)
+        map_result["count"] = count_safe_after_filter
+        
         map_result["answer"] = answer
         map_result["grouped_names"] = [obj.get("tooltip", "") for obj in objects_for_map]
         
@@ -493,7 +531,15 @@ def objects_in_polygon_simply():
                 "objects_count": len(objects_for_map),
                 "biological_names_count": len(all_biological_names),
                 "biological_names_list": all_biological_names,  # Для отладки
-                "popup_style": "custom_scrollbar_v2"
+                "popup_style": "custom_scrollbar_v2",
+                # Добавляем нашу статистику в debug ответ
+                "stats_counters": {
+                    "raw_db": count_raw_from_db,
+                    "safe_filtered": count_safe_after_filter,
+                    "no_geo": count_missing_geo,
+                    "duplicates_in_point": count_duplicates_in_point,
+                    "visible_in_popups": count_total_in_popups
+                }
             }
             map_result["debug"] = debug_info
 
@@ -517,7 +563,7 @@ def objects_in_polygon_simply():
             response["in_stoplist_filter_applied"] = True
             response["in_stoplist_level"] = in_stoplist
         return jsonify(response), 500
-    
+     
 @app.route("/objects_in_area_by_type", methods=["POST"])
 def objects_in_area_by_type():
     data = request.get_json()
@@ -1011,6 +1057,11 @@ def search_images_by_features():
             "timestamp": time.time()
         }
         
+        # ИНИЦИАЛИЗИРУЕМ ПЕРЕМЕННЫЕ ЗАРАНЕЕ
+        safe_images = []
+        stoplisted_images = []
+        result = None
+        
         if species_name:
             result = search_service.search_images_by_features(
                 species_name=species_name,
@@ -1079,8 +1130,8 @@ def search_images_by_features():
                 }
                 debug_info["stoplist_filter"] = {
                     "total_before_filter": len(result.get("images", [])),
-                    "safe_after_filter": len(safe_images) if species_name else "N/A",
-                    "stoplisted_count": len(stoplisted_images) if species_name else "N/A"
+                    "safe_after_filter": len(safe_images),
+                    "stoplisted_count": len(stoplisted_images)
                 }
                 result["debug"] = debug_info
                 
@@ -1346,7 +1397,7 @@ def get_object_description():
     try:
         # Определяем лимиты для разных случаев
         search_limit = limit if limit > 0 else 1500
-        context_limit = 5
+        context_limit = 6
         
         if filter_data:
             descriptions = search_service.get_object_descriptions_by_filters(
@@ -2429,7 +2480,8 @@ def api_coords_to_map():
                 "resolved_name": species_name,
                 "resolved": resolved_species_info.get("resolved", False)
             }
-        
+        logger.debug("Все объекты:")
+        logger.debug(objects)
         if not objects:
             response = {
                 "status": "no_objects", 
@@ -2444,7 +2496,10 @@ def api_coords_to_map():
         # ФИЛЬТРАЦИЯ ПО STOPLIST для найденных объектов
         safe_objects = []
         stoplisted_objects = []
-        
+        logger.debug("Безопасные")
+        logger.debug(safe_objects)
+        logger.debug("Стоплистед")
+        logger.debug(stoplisted_objects)
         for obj in objects:
             # Проверяем feature_data объектов на in_stoplist
             feature_data = obj.get("features", {})
