@@ -31,7 +31,75 @@ class RelationalService:
             "port": os.getenv("DB_PORT", "5432")
         }
         self.species_synonyms = self._load_species_synonyms(species_synonyms_path)
+# Добавляем в класс RelationalService после метода execute_query
 
+    def log_error_to_db(
+        self,
+        user_query: str = "",
+        error_message: str = "",
+        context: dict = None,
+        additional_info: dict = None
+    ) -> tuple[bool, int, str]:
+        """
+        Логирование ошибки в таблицу error_log
+        
+        Args:
+            user_query: Текст запроса пользователя
+            error_message: Описание ошибки (обязательно)
+            context: JSON объект с контекстом ошибки
+            additional_info: JSON объект с дополнительной информацией
+            
+        Returns:
+            Tuple[bool, int, str]: (success, error_id, message)
+        """
+        try:
+            # Валидация обязательных полей
+            if not error_message:
+                return False, 0, "Обязательное поле 'error_message' отсутствует"
+            
+            # Подготовка данных
+            if context is None:
+                context = {}
+            if additional_info is None:
+                additional_info = {}
+            
+            # SQL запрос для вставки (соответствует новой структуре таблицы)
+            insert_query = """
+            INSERT INTO error_log (
+                user_query, 
+                error_message, 
+                context, 
+                additional_info,
+                created_at
+            ) VALUES (%s, %s, %s, %s, NOW())
+            RETURNING id
+            """
+            
+            # Выполняем запрос
+            from psycopg2.extras import Json
+            conn = psycopg2.connect(**self.db_config)
+            cursor = conn.cursor()
+            
+            cursor.execute(insert_query, (
+                user_query,
+                error_message,
+                Json(context),
+                Json(additional_info)
+            ))
+            
+            error_id = cursor.fetchone()[0]
+            conn.commit()
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"✅ Ошибка записана в базу с ID: {error_id}")
+            return True, error_id, "Ошибка успешно записана"
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при записи в базу данных: {str(e)}")
+            return False, 0, f"Ошибка при записи в базу данных: {str(e)}"
+        
     def search_images_by_features(
     self,
     species_name: str,

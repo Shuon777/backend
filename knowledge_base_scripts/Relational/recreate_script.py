@@ -135,7 +135,8 @@ class DatabaseRecreator:
             public.text_content,
             public.video_content,
             public.volunteer_initiative,
-            public.weather_reference
+            public.weather_reference,
+            public.error_log
         CASCADE;
 
         DROP EXTENSION IF EXISTS postgis CASCADE;
@@ -468,8 +469,21 @@ class DatabaseRecreator:
             link_type VARCHAR(50),
             platform VARCHAR(100)  -- Rutube, YouTube, VK и т.д.
         );
+            -- Таблица для сбора ошибок
+        CREATE TABLE error_log (
+            id SERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            user_query TEXT,
+            error_message TEXT NOT NULL,
+            context JSONB,
+            additional_info JSONB
+        );
 
         -- Индексы
+        CREATE INDEX idx_error_log_created_at ON error_log (created_at);
+        CREATE INDEX idx_error_log_resolved ON error_log (resolved);
+        CREATE INDEX idx_error_log_context ON error_log USING GIN (context);
+        CREATE INDEX idx_error_log_additional_info ON error_log USING GIN (additional_info);
         CREATE INDEX idx_external_link_type ON external_link (link_type);
         CREATE INDEX idx_external_link_platform ON external_link (platform);
         CREATE INDEX idx_map_geometry ON map_content USING GIST(geometry);
