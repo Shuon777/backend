@@ -481,7 +481,6 @@ class DatabaseRecreator:
 
         -- Индексы
         CREATE INDEX idx_error_log_created_at ON error_log (created_at);
-        CREATE INDEX idx_error_log_resolved ON error_log (resolved);
         CREATE INDEX idx_error_log_context ON error_log USING GIN (context);
         CREATE INDEX idx_error_log_additional_info ON error_log USING GIN (additional_info);
         CREATE INDEX idx_external_link_type ON external_link (link_type);
