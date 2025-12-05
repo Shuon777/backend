@@ -581,8 +581,8 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                     params['exact_location_pattern'] = r'(^|[\s,."])' + re.escape(exact_location) + r'([\s,."]|$)'
             
             # Точный поиск по region - слово целиком
-            if 'region' in location_info and location_info['region']:
-                region = location_info['region'].strip()
+            if 'region' in location_info:
+                region = location_info.get('region', '').strip()
                 if region:
                     conditions.append(
                         "be.feature_data->'location_info'->>'region' ~ %(region_pattern)s"
@@ -1503,100 +1503,164 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
     def _extract_content_from_structured_data(self, structured_data: Dict) -> str:
         """
         Извлекает и форматирует текстовый контент из structured_data
-        Поддерживает как флору, так и фауну
+        Поддерживает как флору/фауну, так и географические объекты
         """
         if not structured_data:
             return ""
         
         content_sections = []
         
-        # Русские названия разделов для флоры и фауны
-        section_titles = {
-            # Общие разделы
-            'taxonomy': 'Таксономия',
-            'morphology': 'Морфология',
-            'ecology': 'Экология', 
-            'distribution': 'Распространение',
-            'conservation': 'Охранный статус',
-            'significance': 'Значение',
+        # Проверяем тип структуры данных
+        if 'geographical_info' in structured_data:
+            # Обработка географических объектов
+            geo_info = structured_data.get('geographical_info', {})
             
-            # Разделы для флоры
-            'phenology': 'Фенология',
+            # Русские названия полей для географических объектов
+            geo_field_titles = {
+                'name': 'Название',
+                'coordinates': 'Координаты',
+                'description': 'Описание',
+                'object_type': 'Тип объекта',
+                'address': 'Адрес',
+                'region': 'Регион',
+                'country': 'Страна',
+                'historical_info': 'Историческая справка',
+                'architectural_features': 'Архитектурные особенности',
+                'cultural_significance': 'Культурное значение',
+                'visiting_info': 'Информация для посещения'
+            }
             
-            # Разделы для фауны  
-            'biology': 'Биология',
-        }
-        
-        # Русские названия полей для флоры и фауны
-        field_titles = {
-            # Общие поля
-            'general_description': 'Общее описание',
-            'habitat': 'Местообитание',
-            'ecological_role': 'Экологическая роль',
-            'geographical_range': 'Географический ареал',
-            'baikal_region_status': 'Статус в Байкальском регионе',
-            'practical_use': 'Практическое использование',
-            'scientific_value': 'Научное значение',
-            'threats': 'Угрозы',
-            'red_book_status': 'Статус в Красной книге',
-            'protection_status': 'Статус охраны',
-            'protected_areas': 'Охраняемые территории',
-            
-            # Поля таксономии
-            'family': 'Семейство',
-            'genus': 'Род', 
-            'species': 'Вид',
-            
-            # Поля морфологии
-            'size_weight': 'Размер и вес',
-            'body_structure': 'Строение тела',
-            'coloration': 'Окрас',
-            'special_adaptations': 'Особые адаптации',
-            
-            # Поля для флоры
-            'flowering_period': 'Период цветения',
-            'fruiting_period': 'Период плодоношения', 
-            'vegetation_period': 'Период вегетации',
-            'soil_preferences': 'Предпочтения к почве',
-            'light_requirements': 'Требования к свету',
-            'moisture_requirements': 'Требования к влаге',
-            'species_interactions': 'Взаимодействие с другими видами',
-            'stem': 'Стебель',
-            'roots': 'Корни',
-            'fruits': 'Плоды',
-            'leaves': 'Листья',
-            'flowers': 'Цветы',
-            
-            # Поля для фауны
-            'diet': 'Питание',
-            'reproduction': 'Размножение',
-            'lifespan': 'Продолжительность жизни',
-            'behavior': 'Поведение',
-            'predators': 'Хищники',
-            'depth_distribution': 'Распределение по глубинам',
-        }
-        
-        for section, section_data in structured_data.items():
-            if section not in section_titles or not isinstance(section_data, dict):
-                continue
-                
-            section_content = []
-            for field, value in section_data.items():
-                if (value not in ['-', '', None] and 
-                    isinstance(value, str) and 
-                    len(value.strip()) > 0):
+            geo_content = []
+            for field, value in geo_info.items():
+                if field not in geo_field_titles:
+                    continue
                     
-                    # Используем русское название поля, если доступно
-                    field_title = field_titles.get(field, field)
-                    section_content.append(f"{field_title}: {value}")
+                if field == 'coordinates' and isinstance(value, dict):
+                    lat = value.get('latitude')
+                    lon = value.get('longitude')
+                    if lat and lon:
+                        geo_content.append(f"Координаты: {lat}, {lon}")
+                elif isinstance(value, str) and value.strip():
+                    field_title = geo_field_titles.get(field, field)
+                    geo_content.append(f"{field_title}: {value.strip()}")
+                elif isinstance(value, (int, float)):
+                    field_title = geo_field_titles.get(field, field)
+                    geo_content.append(f"{field_title}: {value}")
             
-            if section_content:
+            if geo_content:
                 content_sections.append(
-                    f"{section_titles[section]}:\n" + 
-                    "\n".join(f"• {line}" for line in section_content)
+                    "Информация о географическом объекте:\n" + 
+                    "\n".join(f"• {line}" for line in geo_content)
                 )
+            
+            # Также проверяем metadata
+            metadata = structured_data.get('metadata', {})
+            if isinstance(metadata, dict):
+                meta_info = metadata.get('meta_info', {})
+                if isinstance(meta_info, dict):
+                    meta_content = []
+                    for key, val in meta_info.items():
+                        if isinstance(val, str) and val.strip():
+                            if key == 'external_title':
+                                meta_content.append(f"Название: {val.strip()}")
+                            elif key == 'url':
+                                meta_content.append(f"Источник: {val.strip()}")
+                    
+                    if meta_content:
+                        content_sections.append(
+                            "Дополнительная информация:\n" + 
+                            "\n".join(f"• {line}" for line in meta_content)
+                        )
+            
+            # Если description пустой, формируем базовое описание из других полей
+            description = geo_info.get('description', '').strip()
+            if not description:
+                name = geo_info.get('name', 'Объект')
+                object_type = geo_info.get('object_type', '')
+                if object_type:
+                    description = f"{name} - {object_type}."
+                else:
+                    description = name
+            
+            # Если после обработки все еще нет контента, возвращаем базовое описание
+            if not content_sections:
+                return description
+            
+            result = "\n\n".join(content_sections)
+            return result if result.strip() else description
         
-        return "\n\n".join(content_sections) if content_sections else ""
+        else:
+            # Оригинальная логика для флоры и фауны
+            section_titles = {
+                'taxonomy': 'Таксономия',
+                'morphology': 'Морфология',
+                'ecology': 'Экология', 
+                'distribution': 'Распространение',
+                'conservation': 'Охранный статус',
+                'significance': 'Значение',
+                'phenology': 'Фенология',
+                'biology': 'Биология',
+            }
+            
+            field_titles = {
+                'general_description': 'Общее описание',
+                'habitat': 'Местообитание',
+                'ecological_role': 'Экологическая роль',
+                'geographical_range': 'Географический ареал',
+                'baikal_region_status': 'Статус в Байкальском регионе',
+                'practical_use': 'Практическое использование',
+                'scientific_value': 'Научное значение',
+                'threats': 'Угрозы',
+                'red_book_status': 'Статус в Красной книге',
+                'protection_status': 'Статус охраны',
+                'protected_areas': 'Охраняемые территории',
+                'family': 'Семейство',
+                'genus': 'Род', 
+                'species': 'Вид',
+                'size_weight': 'Размер и вес',
+                'body_structure': 'Строение тела',
+                'coloration': 'Окрас',
+                'special_adaptations': 'Особые адаптации',
+                'flowering_period': 'Период цветения',
+                'fruiting_period': 'Период плодоношения', 
+                'vegetation_period': 'Период вегетации',
+                'soil_preferences': 'Предпочтения к почве',
+                'light_requirements': 'Требования к свету',
+                'moisture_requirements': 'Требования к влаге',
+                'species_interactions': 'Взаимодействие с другими видами',
+                'stem': 'Стебель',
+                'roots': 'Корни',
+                'fruits': 'Плоды',
+                'leaves': 'Листья',
+                'flowers': 'Цветы',
+                'diet': 'Питание',
+                'reproduction': 'Размножение',
+                'lifespan': 'Продолжительность жизни',
+                'behavior': 'Поведение',
+                'predators': 'Хищники',
+                'depth_distribution': 'Распределение по глубинам',
+            }
+            
+            for section, section_data in structured_data.items():
+                if section not in section_titles or not isinstance(section_data, dict):
+                    continue
+                    
+                section_content = []
+                for field, value in section_data.items():
+                    if (value not in ['-', '', None] and 
+                        isinstance(value, str) and 
+                        len(value.strip()) > 0):
+                        
+                        field_title = field_titles.get(field, field)
+                        section_content.append(f"{field_title}: {value}")
+                
+                if section_content:
+                    content_sections.append(
+                        f"{section_titles[section]}:\n" + 
+                        "\n".join(f"• {line}" for line in section_content)
+                    )
+            
+            return "\n\n".join(content_sections) if content_sections else ""
             
     def execute_query(self, sql_query: str, params: tuple = None) -> List[Dict]:
         """Выполняет SQL-запрос в PostgreSQL с поддержкой параметров"""
