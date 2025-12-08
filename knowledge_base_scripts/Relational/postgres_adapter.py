@@ -1093,7 +1093,14 @@ class NewResourceImporter:
             # ФИКС: Сохраняем in_stoplist как число
             in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
-            # Создаем базовый feature_data с in_stoplist
+            # ФИКС: Обрабатываем baikal_relation как массив или строку
+            baikal_relation = resource.get('baikal_relation')
+            if isinstance(baikal_relation, str):
+                baikal_relation = [baikal_relation]  # Преобразуем строку в массив
+            elif baikal_relation is None:
+                baikal_relation = []
+            
+            # Создаем базовый feature_data с in_stoplist и baikal_relation
             feature_data = {
                 'source': 'sights.json',
                 'original_name': common_name,
@@ -1102,7 +1109,7 @@ class NewResourceImporter:
                 'information_type': resource.get('information_type'),
                 'validation_status': resource.get('validation_status'),
                 'validation_result': resource.get('validation_result'),
-                'baikal_relation': resource.get('baikal_relation'),
+                'baikal_relation': baikal_relation,  # Теперь всегда массив
                 'blacklist_detected': resource.get('blacklist_detected'),
                 'blacklist_risk': resource.get('blacklist_risk'),
                 'finish_reason': resource.get('finish_reason'),
@@ -1110,6 +1117,8 @@ class NewResourceImporter:
                 # ДОБАВЛЯЕМ meta_info
                 'meta_info': resource.get('meta_info', {})
             }
+            
+            # ... остальной код метода без изменений
 
             # Добавляем данные из resource['feature_data'], если они есть
             if 'feature_data' in resource and resource['feature_data']:
@@ -1365,12 +1374,21 @@ class NewResourceImporter:
             # ФИКС: Сохраняем in_stoplist как число
             in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
+            # ФИКС: Обрабатываем baikal_relation как массив или строку
+            baikal_relation = resource.get('baikal_relation')
+            if isinstance(baikal_relation, str):
+                baikal_relation = [baikal_relation]
+            elif baikal_relation is None:
+                baikal_relation = []
+            
             # Собираем feature_data для текстового контента
             feature_data = {
-                'in_stoplist': in_stoplist_value,  # Сохраняем как число
+                'in_stoplist': in_stoplist_value,
                 'information_type': resource.get('information_type'),
-                'source': name_info.get('source')
+                'source': name_info.get('source'),
+                'baikal_relation': baikal_relation  # Добавляем baikal_relation
             }
+            
             
             # Добавляем дополнительные поля, если они есть
             if 'validation_status' in resource:
@@ -1499,9 +1517,19 @@ class NewResourceImporter:
             # ФИКС: Сохраняем in_stoplist как число
             in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
             
-            # Добавляем in_stoplist в feature_data изображения
+            # ФИКС: Обрабатываем baikal_relation как массив или строку
+            baikal_relation = resource.get('baikal_relation')
+            if isinstance(baikal_relation, str):
+                baikal_relation = [baikal_relation]
+            elif baikal_relation is None:
+                baikal_relation = []
+            
+            # Добавляем in_stoplist и baikal_relation в feature_data изображения
             image_feature_data = feature_photo.copy() if feature_photo else {}
-            image_feature_data['in_stoplist'] = in_stoplist_value  # Сохраняем как число
+            image_feature_data['in_stoplist'] = in_stoplist_value
+            image_feature_data['baikal_relation'] = baikal_relation  # Добавляем baikal_relation
+            
+            # ... остальной код метода
             
             self.cur.execute(
                 "INSERT INTO image_content (title, description, feature_data) "

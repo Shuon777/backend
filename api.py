@@ -29,18 +29,27 @@ from utils import (
     get_cache_stats,
     init_redis
 )
+from dotenv import load_dotenv
+
+load_dotenv()
 
 matplotlib_logger = logging.getLogger('matplotlib')
 matplotlib_logger.setLevel(logging.WARNING)
 
+#Redis settings
+REDIS_HOST=os.getenv("REDIS_HOST")
+REDIS_PORT=os.getenv("REDIS_PORT")
+REDIS_DB=os.getenv("REDIS_DB")
+
 app = Flask(__name__)
 CORS(app)
 
-MAPS_DIR = os.getenv("MAPS_DIR","/var/www/map_bot/maps")
-DOMAIN = os.getenv("","https://testecobot.ru")
+MAPS_DIR = os.getenv("MAPS_DIR")
+DOMAIN = os.getenv("PUBLIC_BASE_URL")
+
 geo = GeoProcessor(maps_dir=MAPS_DIR, domain=DOMAIN)
 slot_val = Slot_validator()
-init_redis(host='localhost', port=6379, db=1, decode_responses=True)
+init_redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
 
 current_dir = Path(__file__).parent
 embedding_model_path = str(current_dir / "embedding_models" / "BERTA")
@@ -771,8 +780,6 @@ def objects_in_area_by_type():
                 })
                 
                 popup_html = f"<h6>{name}</h6>"
-                if obj_type:
-                    popup_html += f"<p><strong>Тип:</strong> {obj_type}</p>"
                 if description:
                     short_desc = description[:200] + "..." if len(description) > 200 else description
                     popup_html += f"<p>{short_desc}</p>"

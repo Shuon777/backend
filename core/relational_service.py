@@ -590,12 +590,16 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                     params['region_pattern'] = r'\y' + re.escape(region) + r'\y'
                     
             if 'baikal_relation' in filter_data:
-                baikal_relation = filter_data['baikal_relation'].strip()
+                baikal_relation = filter_data['baikal_relation']
+                if isinstance(baikal_relation, str):
+                    baikal_relation = [baikal_relation.strip()]
+                elif isinstance(baikal_relation, list):
+                    baikal_relation = [item.strip() for item in baikal_relation if item]
+                
                 if baikal_relation:
-                    conditions.append(
-                        "be.feature_data->>'baikal_relation' ILIKE %(baikal_relation)s"
-                    )
-                    params['baikal_relation'] = f'%{baikal_relation}%'
+                    # Используем оператор ?| для поиска в массиве JSONB
+                    conditions.append("be.feature_data->'baikal_relation' ?| %(baikal_relation_array)s")
+                    params['baikal_relation_array'] = baikal_relation
                     
         # Обработка geo_type (оставляем без изменений)
         if 'geo_type' in filter_data:
