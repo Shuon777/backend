@@ -1408,7 +1408,94 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         except Exception as e:
             logger.error(f"Ошибка поиска объектов по типу в области: {str(e)}")
             return []
+        
+    def find_geometry(self, area_name: str) -> Optional[Dict]:
+        """
+        Поиск полигона или точки области ТОЛЬКО по точному совпадению названия
+        """
+        normalized_name = area_name.strip()
+        
+        query = """
+        SELECT 
+            mc.id,
+            mc.title,
+            ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,
+            mc.feature_data,
+            'map_content' as source
+        FROM map_content mc
+        WHERE LOWER(TRIM(mc.title)) = LOWER(%s)  -- ТОЧНОЕ СОВПАДЕНИЕ
+        AND (
+            mc.feature_data->>'type' IN ('geographical_entity', 'region', 'city', 'area', 'polygon')
+            OR ST_GeometryType(mc.geometry) != 'ST_Point'
+        )
+        LIMIT 1
+        """
+        
+        try:
+            results = self.execute_query(query, (normalized_name,))
+            if results:
+                row = results[0]
+                geometry_geojson = row['geometry_geojson']
+                
+                logger.debug(f"Найдена геометрия для '{area_name}': {geometry_geojson.get('type') if geometry_geojson else 'None'}")
+                
+                if geometry_geojson:
+                    return {
+                        "geometry": geometry_geojson,
+                        "area_info": {
+                            "id": row['id'],
+                            "title": row['title'],
+                            "source": row['source'],
+                            "feature_data": row['feature_data']
+                        }
+                    }
+        
+            geo_query = """
+            SELECT 
+                ge.id,
+                ge.name_ru as title,
+                ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,  -- Преобразуем WKB в GeoJSON
+                mc.feature_data,
+                'geographical_entity' as source
+            FROM geographical_entity ge
+            JOIN entity_geo eg ON ge.id = eg.geographical_entity_id
+            JOIN map_content mc ON eg.entity_id = mc.id AND eg.entity_type = 'map_content'
+            WHERE ge.name_ru ILIKE %s
+            ORDER BY 
+                CASE 
+                    WHEN ge.name_ru ILIKE %s THEN 0
+                    ELSE 1
+                END,
+                LENGTH(ge.name_ru)
+            LIMIT 1
+            """
             
+            geo_results = self.execute_query(geo_query, (f'%{area_name}%', area_name))
+            
+            if geo_results:
+                row = geo_results[0]
+                geometry_geojson = row['geometry_geojson']
+                
+                logger.debug(f"Найдена геометрия (geo) для '{area_name}': {geometry_geojson.get('type') if geometry_geojson else 'None'}")
+                
+                if geometry_geojson:
+                    return {
+                        "geometry": geometry_geojson,
+                        "area_info": {
+                            "id": row['id'],
+                            "title": row['title'],
+                            "source": row['source'],
+                            "feature_data": row['feature_data']
+                        }
+                    }
+            
+            logger.warning(f"Полигон для области '{area_name}' не найден")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка поиска полигона области '{area_name}': {str(e)}")
+            return None
+              
     def find_area_geometry(self, area_name: str) -> Optional[Dict]:
         """
         Поиск полигона области в таблице map_content

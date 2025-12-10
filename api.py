@@ -218,7 +218,7 @@ def objects_in_polygon_simply():
             "error": str(e)
         })
     
-    entry = get_place(name)
+    entry = relational_service.find_geometry(name)
     if not entry or "geometry" not in entry:
         flexible_result = find_place_flexible(name)
         if flexible_result and flexible_result.get("status") == "found":
@@ -780,6 +780,7 @@ def objects_in_area_by_type():
                 })
                 
                 popup_html = f"<h6>{name}</h6>"
+
                 if description:
                     short_desc = description[:200] + "..." if len(description) > 200 else description
                     popup_html += f"<p>{short_desc}</p>"
