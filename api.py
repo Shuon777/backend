@@ -5,13 +5,12 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import unquote
-
 import redis
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from http.client import HTTPException
 from shapely.geometry import shape
-
+import shutil  
 import hashlib
 from core.coordinates_finder import GeoProcessor
 from core.relational_service import RelationalService
@@ -30,6 +29,17 @@ from utils import (
     init_redis
 )
 from dotenv import load_dotenv
+import os
+from pathlib import Path
+from werkzeug.utils import secure_filename
+import tempfile
+
+# Добавим импорт нашего сервиса
+from core.resource_update_service import ResourceUpdateService
+BASE_DIR = Path(__file__).parent
+# Константы для путей
+RESOURCES_DIST_PATH = str(BASE_DIR / "json_files" / "resources_dist.json")
+IMAGES_DIR = "images"
 
 load_dotenv()
 
@@ -148,6 +158,706 @@ def log_error():
             "used_objects": [],
             "not_used_objects": []
         }), 500
+@app.route("/reload_database", methods=["POST"])
+def reload_database():
+    """
+    Эндпоинт для перезагрузки базы данных без добавления новых ресурсов
+    
+    Принимает:
+    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ
+    - incremental: флаг инкрементального обновления (true/false)
+    - use_stubs: флаг использования заглушек для векторов (true/false)
+    """
+    try:
+        logger.info(f"📤 /reload_database - получен запрос")
+        
+        reload_database_param = request.form.get('reload_database', 'false').lower() == 'true'
+        incremental = request.form.get('incremental', 'true').lower() == 'true'
+        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        
+        logger.info(f"Параметры запроса:")
+        logger.info(f"  - reload_database: {reload_database_param}")
+        logger.info(f"  - incremental: {incremental}")
+        logger.info(f"  - use_stubs: {use_stubs}")
+        
+        if not reload_database_param:
+            return jsonify({
+                "status": "error",
+                "message": "Параметр reload_database должен быть true для перезагрузки БД",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 400
+        
+        # Проверяем существование ресурсного файла
+        if not os.path.exists(RESOURCES_DIST_PATH):
+            logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
+            return jsonify({
+                "status": "error",
+                "message": f"Файл resources_dist.json не найден",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 404
+        
+        # Создаем сервис для обработки
+        service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
+        
+        # Вызываем метод только для перезагрузки БД
+        results = service.reload_database_only(
+            reload_database=reload_database_param,
+            use_stubs=use_stubs,
+            incremental=incremental
+        )
+        
+        # Формируем ответ
+        response_data = {
+            "status": "success",
+            "message": "База данных успешно перезагружена",
+            "results": results,
+            "used_objects": [
+                {
+                    "name": "resources_dist.json",
+                    "type": "configuration",
+                    "operation": "read"
+                }
+            ],
+            "not_used_objects": []
+        }
+        
+        if not results["database_reloaded"]:
+            response_data["status"] = "error"
+            response_data["message"] = "Ошибка при перезагрузке базы данных"
+            if results.get("errors"):
+                response_data["message"] += f": {', '.join(results['errors'])}"
+        
+        logger.info(f"✅ Перезагрузка БД завершена: {results}")
+        return jsonify(response_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /reload_database: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": f"Внутренняя ошибка сервера: {str(e)}",
+            "used_objects": [],
+            "not_used_objects": []
+        }), 500
+        
+@app.route("/upload_resources", methods=["POST"])
+def upload_resources():
+    """
+    Эндпоинт для загрузки архивов с аннотациями и изображениями
+    
+    Принимает:
+    - json_archive: zip архив с JSON аннотациями (не обязательно)
+    - images_archive: zip архив с изображениями (не обязательно)
+    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ для обновления БД
+    - incremental_update: флаг инкрементального обновления (true/false)
+    - use_stubs: флаг использования заглушек для векторов (true/false)
+    """
+    try:
+        logger.info(f"📤 /upload_resources - получен запрос")
+        
+        # Проверяем наличие файлов
+        has_json = 'json_archive' in request.files and request.files['json_archive'].filename
+        has_images = 'images_archive' in request.files and request.files['images_archive'].filename
+        
+        reload_database = request.form.get('reload_database', 'false').lower() == 'true'
+        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'  # По умолчанию true
+        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        
+        logger.info(f"Параметры запроса:")
+        logger.info(f"  - Есть JSON архив: {has_json}")
+        logger.info(f"  - Есть архив изображений: {has_images}")
+        logger.info(f"  - reload_database: {reload_database}")
+        logger.info(f"  - incremental_update: {incremental_update}")
+        logger.info(f"  - use_stubs: {use_stubs}")
+        
+        # ВАЖНО: Проверяем значения
+        logger.info(f"🔍 Проверка значений из request.form:")
+        for key in request.form:
+            logger.info(f"  - {key}: {request.form.get(key)}")
+        
+        # Проверяем существование ресурсного файла
+        if not os.path.exists(RESOURCES_DIST_PATH):
+            logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
+            # Создаем файл если не существует
+            try:
+                os.makedirs(os.path.dirname(RESOURCES_DIST_PATH), exist_ok=True)
+                with open(RESOURCES_DIST_PATH, 'w', encoding='utf-8') as f:
+                    json.dump({"resources": []}, f, ensure_ascii=False, indent=2)
+                logger.info(f"Создан новый файл resources_dist.json")
+            except Exception as e:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Не удалось создать resources_dist.json: {str(e)}",
+                    "used_objects": [],
+                    "not_used_objects": []
+                }), 500
+        
+        # Создаем временную папку для сохранения архивов
+        temp_dir = tempfile.mkdtemp()
+        json_archive_path = None
+        images_archive_path = None
+        
+        try:
+            # Сохраняем JSON архив если есть
+            if has_json:
+                json_file = request.files['json_archive']
+                filename = secure_filename(json_file.filename)
+                json_archive_path = os.path.join(temp_dir, filename)
+                json_file.save(json_archive_path)
+                logger.info(f"Сохранен JSON архив: {json_archive_path} ({os.path.getsize(json_archive_path)} байт)")
+            
+            # Сохраняем архив с изображениями если есть
+            if has_images:
+                images_file = request.files['images_archive']
+                filename = secure_filename(images_file.filename)
+                images_archive_path = os.path.join(temp_dir, filename)
+                images_file.save(images_archive_path)
+                logger.info(f"Сохранен архив с изображениями: {images_archive_path} ({os.path.getsize(images_archive_path)} байт)")
+            
+            # Создаем сервис для обработки
+            service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
+            
+            # Обрабатываем загрузку
+            results = service.process_upload(
+                json_archive_path=json_archive_path,
+                images_archive_path=images_archive_path,
+                reload_database=reload_database,
+                use_stubs=use_stubs,
+                incremental=incremental_update  # Передаем параметр
+            )
+            
+            # Добавляем информацию о типе обновления
+            if reload_database:
+                results["update_type"] = "полное" if not incremental_update else "инкрементальное"
+            else:
+                results["update_type"] = "без обновления БД"
+            
+            # Формируем ответ
+            response_data = {
+                "status": "success",
+                "message": "Ресурсы успешно обработаны",
+                "results": results,
+                "used_objects": [
+                    {
+                        "name": "resources_dist.json",
+                        "type": "configuration",
+                        "operation": "update"
+                    }
+                ],
+                "not_used_objects": []
+            }
+            
+            if results.get("errors"):
+                response_data["status"] = "partial_success"
+                response_data["message"] = f"Обработка завершена с ошибками"
+            
+            logger.info(f"✅ Обработка завершена: {results}")
+            return jsonify(response_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки загрузки: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                "status": "error",
+                "message": f"Ошибка обработки: {str(e)}",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 500
+            
+        finally:
+            # Удаляем временную папку
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info(f"Удалена временная папка: {temp_dir}")
+                except Exception as e:
+                    logger.error(f"Ошибка удаления временной папки: {str(e)}")
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /upload_resources: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": f"Внутренняя ошибка сервера: {str(e)}",
+            "used_objects": [],
+            "not_used_objects": []
+        }), 500
+        
+@app.route("/find_off_near_attractions", methods=["POST"])
+def find_off_near_attractions():
+    """
+    Поиск ОФФ около достопримечательностей в указанной области
+    Args в JSON body:
+    - area_name: название области (например, "Иркутск") - опционально
+    - area_polygon: GeoJSON полигона области - опционально (если нет area_name)
+    - attraction_types: список типов достопримечательностей (например, ["музей", "памятник"])
+    - attraction_subtypes: список подтипов достопримечательностей - опционально
+    - off_types: типы ОФФ для поиска (например, ["biological_entity"]) - по умолчанию biological_entity
+    - buffer_radius_km: радиус буферной зоны вокруг достопримечательностей в км (по умолчанию 1)
+    - limit: ограничение на количество результатов
+    - in_stoplist: уровень фильтрации безопасности
+    """
+    debug_mode = request.args.get("debug_mode", "false").lower() == "true"
+    
+    data = request.get_json()
+    logger.info(f"🔍 /find_off_near_attractions - запрос: {data}")
+    
+    # Параметры для кеша
+    cache_params = {
+        "area_name": data.get("area_name"),
+        "area_polygon": data.get("area_polygon"),
+        "attraction_types": data.get("attraction_types"),
+        "attraction_subtypes": data.get("attraction_subtypes"),
+        "off_types": data.get("off_types", ["biological_entity"]),
+        "buffer_radius_km": data.get("buffer_radius_km", 1),
+        "limit": data.get("limit", 50),
+        "in_stoplist": data.get("in_stoplist", "1"),
+        "version": "v1"
+    }
+    
+    redis_key = f"cache:off_near_attractions:{generate_cache_key(cache_params)}"
+    debug_info = {
+        "timestamp": time.time(),
+        "cache_key": redis_key,
+        "steps": []
+    }
+    
+    # Проверяем кеш
+    cache_hit, cached_result = get_cached_result(redis_key, debug_info)
+    if cache_hit:
+        if debug_mode:
+            cached_result["debug"] = debug_info
+        return jsonify(cached_result)
+    
+    # Извлекаем параметры
+    area_name = data.get("area_name")
+    area_polygon = data.get("area_polygon")
+    attraction_types = data.get("attraction_types", [])
+    attraction_subtypes = data.get("attraction_subtypes", [])
+    off_types = data.get("off_types", ["biological_entity"])
+    buffer_radius_km = data.get("buffer_radius_km", 1.0)
+    limit = data.get("limit", 50)
+    in_stoplist = data.get("in_stoplist", "1")
+    
+    # Валидация параметров
+    if not attraction_types:
+        response = {
+            "error": "Необходимо указать attraction_types (типы достопримечательностей)",
+            "used_objects": [],
+            "not_used_objects": []
+        }
+        return jsonify(response), 400
+    
+    # Debug информация
+    debug_info["parameters"] = {
+        "area_name": area_name,
+        "has_area_polygon": bool(area_polygon),
+        "attraction_types": attraction_types,
+        "attraction_subtypes": attraction_subtypes,
+        "off_types": off_types,
+        "buffer_radius_km": buffer_radius_km,
+        "limit": limit,
+        "in_stoplist": in_stoplist
+    }
+    
+    try:
+        # 1. Получаем полигон области (если указан area_name)
+        area_geometry = None
+        area_info = None
+        
+        if area_name:
+            # Ищем полигон области
+            area_result = relational_service.find_area_geometry(area_name)
+            if area_result:
+                area_geometry = area_result.get("geometry")
+                area_info = area_result.get("area_info", {})
+                debug_info["steps"].append({
+                    "step": "area_search",
+                    "found": True,
+                    "area_title": area_info.get('title', area_name)
+                })
+            else:
+                debug_info["steps"].append({
+                    "step": "area_search",
+                    "found": False,
+                    "error": f"Area '{area_name}' not found"
+                })
+                # Не возвращаем ошибку - продолжаем поиск без ограничения области
+        elif area_polygon:
+            area_geometry = area_polygon
+            debug_info["steps"].append({
+                "step": "area_polygon_provided",
+                "found": True
+            })
+        
+        # 2. Ищем достопримечательности в области
+        attractions = []
+        all_attractions = []
+        
+        for attraction_type in attraction_types:
+            search_object_type = "geographical_entity"
+            # Ищем достопримечательности
+            try:
+                if area_geometry:
+                    # Поиск в ограниченной области
+                    results = relational_service.get_objects_in_area_by_type(
+                        area_geometry=area_geometry,
+                        object_type=search_object_type,
+                        object_subtype=attraction_type if attraction_subtypes else None,
+                        limit=limit * 2,  # Ищем больше достопримечательностей
+                        search_around=False
+                    )
+                else:
+                    # Поиск по всей БД
+                    results = relational_service.search_objects_by_name(
+                        object_name="",
+                        object_type=search_object_type,
+                        object_subtype=attraction_type if attraction_subtypes else None,
+                        limit=limit * 2
+                    )
+                
+                if results:
+                    # Добавляем тип достопримечательности к объектам
+                    for obj in results:
+                        obj["attraction_type"] = attraction_type
+                    all_attractions.extend(results)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка поиска достопримечательностей типа {attraction_type}: {str(e)}")
+                debug_info["steps"].append({
+                    "step": f"attraction_search_{attraction_type}",
+                    "error": str(e)
+                })
+        
+        # Фильтруем достопримечательности по подтипам если указаны
+        if attraction_subtypes:
+            filtered_attractions = []
+            for obj in all_attractions:
+                features = obj.get("features", {})
+                geo_type = features.get("geo_type", {})
+                specific_types = geo_type.get("specific_types", [])
+                
+                # Проверяем, есть ли хотя бы один из указанных подтипов
+                if any(subtype in specific_types for subtype in attraction_subtypes):
+                    filtered_attractions.append(obj)
+            attractions = filtered_attractions[:limit]
+        else:
+            attractions = all_attractions[:limit]
+        
+        debug_info["attraction_search"] = {
+            "total_found": len(all_attractions),
+            "after_filtering": len(attractions),
+            "attraction_types_used": list(set([a.get("attraction_type", "unknown") for a in attractions]))
+        }
+        
+        if not attractions:
+            response = {
+                "status": "no_attractions",
+                "message": f"В указанной области не найдено достопримечательностей типов: {attraction_types}",
+                "used_objects": [],
+                "not_used_objects": []
+            }
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response)
+        
+        # 3. Ищем ОФФ около каждой достопримечательности
+        all_off_results = []
+        attraction_off_map = {}  # Карта достопримечательность -> список ОФФ
+        
+        for attraction in attractions:
+            attraction_id = attraction.get("id")
+            attraction_name = attraction.get("name", "Неизвестная достопримечательность")
+            attraction_geojson = attraction.get("geojson")
+            
+            if not attraction_geojson:
+                continue
+            
+            # Для каждой достопримечательности создаем буферную зону
+            try:
+                # Создаем буферную зону
+                buffer_geometry = search_service.geo_service.create_buffer_geometry(
+                    attraction_geojson, 
+                    buffer_radius_km
+                )
+                
+                if not buffer_geometry:
+                    continue
+                
+                # Ищем ОФФ в буферной зоне
+                for off_type in off_types:
+                    off_results = search_service.geo_service.get_objects_in_polygon(
+                        polygon_geojson=buffer_geometry,
+                        object_type=off_type,
+                        limit=20  # Лимит на ОФФ для одной достопримечательности
+                    )
+                    
+                    if off_results:
+                        # Обрезаем полигоны ОФФ по буферной зоне (если это полигоны)
+                        clipped_results = []
+                        for off_obj in off_results:
+                            # Сохраняем оригинальную геометрию
+                            original_geojson = off_obj.get("geojson")
+                            
+                            # Пытаемся обрезать если это полигон
+                            try:
+                                if original_geojson and original_geojson.get("type") in ["Polygon", "MultiPolygon"]:
+                                    # Используем shapely для обрезки
+                                    from shapely.geometry import shape, mapping
+                                    from shapely.ops import unary_union
+                                    
+                                    buffer_shape = shape(buffer_geometry)
+                                    off_shape = shape(original_geojson)
+                                    
+                                    if buffer_shape.intersects(off_shape):
+                                        intersection = buffer_shape.intersection(off_shape)
+                                        if not intersection.is_empty:
+                                            clipped_geojson = mapping(intersection)
+                                            off_obj["geojson"] = clipped_geojson
+                                        else:
+                                            # Если пересечение пустое, пропускаем
+                                            continue
+                                    else:
+                                        # Нет пересечения
+                                        continue
+                                # Для точек просто проверяем находится ли внутри буфера
+                                elif original_geojson and original_geojson.get("type") == "Point":
+                                    buffer_shape = shape(buffer_geometry)
+                                    off_shape = shape(original_geojson)
+                                    if not buffer_shape.contains(off_shape):
+                                        continue
+                                    
+                            except Exception as e:
+                                logger.warning(f"Ошибка обрезки геометрии ОФФ: {str(e)}")
+                                # Продолжаем с оригинальной геометрией
+                            
+                            # Добавляем информацию о достопримечательности
+                            off_obj["near_attraction"] = {
+                                "id": attraction_id,
+                                "name": attraction_name,
+                                "type": attraction.get("attraction_type", "unknown"),
+                                "distance_km": buffer_radius_km
+                            }
+                            
+                            clipped_results.append(off_obj)
+                        
+                        if clipped_results:
+                            # Убираем дубликаты ОФФ (по id или name+coordinates)
+                            unique_off = {}
+                            for off_obj in clipped_results:
+                                key = off_obj.get("id") or f"{off_obj.get('name')}_{off_obj.get('geojson', {}).get('coordinates', [])}"
+                                if key not in unique_off:
+                                    unique_off[key] = off_obj
+                            
+                            attraction_off_map.setdefault(attraction_id, []).extend(list(unique_off.values()))
+                            all_off_results.extend(list(unique_off.values()))
+                            
+            except Exception as e:
+                logger.error(f"Ошибка поиска ОФФ около {attraction_name}: {str(e)}")
+                debug_info["steps"].append({
+                    "step": f"off_search_near_{attraction_id}",
+                    "error": str(e)
+                })
+        
+        # 4. Подготавливаем данные для карты
+        map_objects = []
+        used_objects = []
+        not_used_objects = []
+        
+        # Добавляем область если есть
+        if area_geometry:
+            map_objects.append({
+                'tooltip': f"Область поиска: {area_info.get('title', area_name) if area_name else 'Пользовательский полигон'}",
+                'popup': f"<h6>Область поиска</h6><p>Поиск достопримечательностей в этой области</p>",
+                'geojson': area_geometry,
+                'style': {'color': 'blue', 'fillOpacity': 0.1, 'weight': 2}
+            })
+        
+        # Добавляем достопримечательности
+        for attraction in attractions:
+            attraction_id = attraction.get("id")
+            attraction_name = attraction.get("name")
+            attraction_type = attraction.get("attraction_type", "unknown")
+            geojson = attraction.get("geojson")
+            
+            used_objects.append({
+                "name": attraction_name,
+                "type": "attraction",
+                "attraction_type": attraction_type,
+                "id": attraction_id
+            })
+            
+            # Создаем popup с информацией о найденных ОФФ
+            off_list = attraction_off_map.get(attraction_id, [])
+            off_count = len(off_list)
+            
+            popup_html = f"<h6>{attraction_name}</h6>"
+            popup_html += f"<p>Тип: {attraction_type}</p>"
+            
+            if off_count > 0:
+                popup_html += f"<p>Найдено ОФФ поблизости: {off_count}</p>"
+                popup_html += "<ul>"
+                for off in off_list[:5]:  # Показываем первые 5
+                    popup_html += f"<li>{off.get('name', 'Неизвестный ОФФ')}</li>"
+                if off_count > 5:
+                    popup_html += f"<li>... и еще {off_count - 5}</li>"
+                popup_html += "</ul>"
+            else:
+                popup_html += "<p>ОФФ поблизости не найдены</p>"
+            
+            map_objects.append({
+                'tooltip': f"{attraction_name} ({attraction_type})",
+                'popup': popup_html,
+                'geojson': geojson,
+                'style': {'color': 'red', 'fillOpacity': 0.3, 'weight': 3}
+            })
+            
+            # Добавляем буферную зону
+            try:
+                buffer_geometry = search_service.geo_service.create_buffer_geometry(
+                    geojson, 
+                    buffer_radius_km
+                )
+                if buffer_geometry:
+                    map_objects.append({
+                        'tooltip': f"Зона поиска ОФФ вокруг {attraction_name}",
+                        'popup': f"<h6>Буферная зона</h6><p>Зона поиска ОФФ в радиусе {buffer_radius_km} км вокруг {attraction_name}</p>",
+                        'geojson': buffer_geometry,
+                        'style': {'color': 'orange', 'fillOpacity': 0.1, 'weight': 2}
+                    })
+            except Exception as e:
+                logger.warning(f"Не удалось создать буфер для {attraction_name}: {str(e)}")
+        
+        # Добавляем ОФФ
+        off_names = set()
+        for off in all_off_results:
+            off_name = off.get("name", "Неизвестный ОФФ")
+            off_type = off.get("type", "unknown")
+            geojson = off.get("geojson")
+            near_attraction = off.get("near_attraction", {})
+            
+            if off_name not in off_names:
+                off_names.add(off_name)
+                used_objects.append({
+                    "name": off_name,
+                    "type": off_type,
+                    "near_attraction": near_attraction.get("name")
+                })
+            
+            popup_html = f"<h6>{off_name}</h6>"
+            popup_html += f"<p>Тип: {off_type}</p>"
+            if near_attraction:
+                popup_html += f"<p>Найден около: {near_attraction.get('name')} ({near_attraction.get('type')})</p>"
+                popup_html += f"<p>Расстояние: до {near_attraction.get('distance_km')} км</p>"
+            
+            map_objects.append({
+                'tooltip': off_name,
+                'popup': popup_html,
+                'geojson': geojson,
+                'style': {'color': 'green', 'fillOpacity': 0.5, 'weight': 2}
+            })
+        
+        # 5. Создаем карту
+        if not map_objects:
+            response = {
+                "status": "no_results",
+                "message": "Не найдено объектов для отображения на карте",
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects
+            }
+            if debug_mode:
+                response["debug"] = debug_info
+            return jsonify(response)
+        
+        try:
+            map_name = redis_key.replace("cache:", "map_").replace(":", "_")
+            map_result = geo.draw_custom_geometries(map_objects, map_name)
+            
+            # Формируем итоговый ответ
+            response_data = {
+                "map": map_result,
+                "statistics": {
+                    "attractions_found": len(attractions),
+                    "off_found": len(all_off_results),
+                    "unique_off_names": len(off_names),
+                    "attraction_types": list(set([a.get("attraction_type", "unknown") for a in attractions])),
+                    "buffer_radius_km": buffer_radius_km
+                },
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects,
+                "in_stoplist_filter_applied": True,
+                "in_stoplist_level": in_stoplist
+            }
+            
+            # Формируем текстовый ответ
+            if area_name:
+                response_data["answer"] = f"В области '{area_name}' найдено {len(attractions)} достопримечательностей. Около них обнаружено {len(all_off_results)} ОФФ ({len(off_names)} уникальных видов)."
+            else:
+                response_data["answer"] = f"Найдено {len(attractions)} достопримечательностей. Около них обнаружено {len(all_off_results)} ОФФ ({len(off_names)} уникальных видов)."
+            
+            # Добавляем списки объектов
+            response_data["attractions"] = [
+                {
+                    "id": a.get("id"),
+                    "name": a.get("name"),
+                    "type": a.get("attraction_type"),
+                    "off_count": len(attraction_off_map.get(a.get("id"), []))
+                }
+                for a in attractions[:10]  # Ограничиваем для ответа
+            ]
+            
+            response_data["off_objects"] = [
+                {
+                    "name": off.get("name"),
+                    "type": off.get("type"),
+                    "near_attraction": off.get("near_attraction", {}).get("name")
+                }
+                for off in all_off_results[:20]  # Ограничиваем для ответа
+            ]
+            
+            # Debug информация
+            if debug_mode:
+                debug_info["results_summary"] = {
+                    "total_map_objects": len(map_objects),
+                    "attraction_off_distribution": {aid: len(offs) for aid, offs in attraction_off_map.items()}
+                }
+                response_data["debug"] = debug_info
+            
+            # Сохраняем в кеш
+            set_cached_result(redis_key, response_data, expire_time=3600)
+            
+            return jsonify(response_data)
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания карты: {str(e)}")
+            error_response = {
+                "error": f"Ошибка создания карты: {str(e)}",
+                "statistics": {
+                    "attractions_found": len(attractions),
+                    "off_found": len(all_off_results)
+                },
+                "used_objects": used_objects,
+                "not_used_objects": not_used_objects
+            }
+            if debug_mode:
+                error_response["debug"] = debug_info
+            return jsonify(error_response), 500
+            
+    except Exception as e:
+        logger.error(f"Ошибка в /find_off_near_attractions: {str(e)}", exc_info=True)
+        error_response = {
+            "error": f"Внутренняя ошибка сервера: {str(e)}",
+            "used_objects": [],
+            "not_used_objects": []
+        }
+        if debug_mode:
+            error_response["debug"] = debug_info
+        return jsonify(error_response), 500
            
 @app.route("/objects_in_polygon_simply", methods=["POST"])
 def objects_in_polygon_simply():

@@ -75,54 +75,148 @@ class GeoProcessor:
             geometries = list(geometry.geoms)
         else:
             geometries = [geometry]
-
-        # Строим GeoDataFrame из всех геометрий
-        gdf = gpd.GeoDataFrame([{"geometry": g} for g in geometries], crs="EPSG:4326").to_crs(epsg=3857)
-
-        # Отрисовка
-        fig, ax = plt.subplots(figsize=(10, 10))
-        gdf.plot(ax=ax, facecolor='skyblue', edgecolor='black', alpha=0.5)
-
-        # Масштабирование с отступами
-        minx, miny, maxx, maxy = gdf.total_bounds
-        buffer = 5000
-        ax.set_xlim(minx - buffer, maxx + buffer)
-        ax.set_ylim(miny - buffer, maxy + buffer)
-
-        self.add_basemap(ax)
-        ax.axis('off')
-        plt.tight_layout(pad=0)
-
-        # Сохранение карты
-        filename = f"{place_name}.jpeg"  # 1. Меняем расширение файла на .jpeg
-        image_path = os.path.join(self.maps_dir, filename)
+        
+        # --- БАЙКАЛЬСКИЙ РЕГИОН: ограничиваем область ---
+        # Границы Байкальского региона (примерные)
+        baikal_bounds = {
+            'min_lon': 100.0,  # Западная граница
+            'max_lon': 112.0,  # Восточная граница
+            'min_lat': 50.0,   # Южная граница
+            'max_lat': 56.0    # Северная граница
+        }
+        
+        # Фильтруем геометрии, чтобы остались только в Байкальском регионе
+        filtered_geometries = []
+        for geom in geometries:
+            if geom.is_empty:
+                continue
+                
+            # Для точек и маленьких полигонов - проверяем центр
+            if geom.geom_type == "Point":
+                if (baikal_bounds['min_lon'] <= geom.x <= baikal_bounds['max_lon'] and
+                    baikal_bounds['min_lat'] <= geom.y <= baikal_bounds['max_lat']):
+                    filtered_geometries.append(geom)
+            else:
+                # Для полигонов - проверяем пересечение с регионом
+                bounds = geom.bounds
+                if (baikal_bounds['min_lon'] <= bounds[2] and  # maxx
+                    baikal_bounds['max_lon'] >= bounds[0] and  # minx
+                    baikal_bounds['min_lat'] <= bounds[3] and  # maxy
+                    baikal_bounds['max_lat'] >= bounds[1]):    # miny
+                    filtered_geometries.append(geom)
+        
+        if not filtered_geometries:
+            # Если все геометрии вне региона, всё равно показываем их
+            filtered_geometries = geometries
+        
+        # Строим GeoDataFrame
+        gdf = gpd.GeoDataFrame(
+            [{"geometry": g} for g in filtered_geometries], 
+            crs="EPSG:4326"
+        ).to_crs(epsg=3857)
+        
+        # Отрисовка с улучшенным качеством
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=500)  # Увеличили размер и DPI
+        
+        # Определяем стили для разных типов геометрий
+        for idx, row in gdf.iterrows():
+            geom = row.geometry
+            
+            # Увеличиваем минимальные размеры для видимости
+            if geom.geom_type == "Point":
+                # Для точек используем маркеры большего размера с прозрачностью
+                gdf_point = gpd.GeoDataFrame([row], crs=gdf.crs)
+                gdf_point.plot(
+                    ax=ax, 
+                    marker='o', 
+                    markersize=80,  # Умеренный размер
+                    color='red', 
+                    edgecolor='darkred',
+                    linewidth=1.5,
+                    alpha=0.7,  # Прозрачность для красных точек
+                    zorder=10  # Точки поверх полигонов
+                )
+            elif geom.geom_type in ["Polygon", "MultiPolygon"]:
+                # Для полигонов с прозрачной заливкой и четкими границами
+                gdf_poly = gpd.GeoDataFrame([row], crs=gdf.crs)
+                area = geom.area
+                # Увеличиваем минимальную толщину линии для маленьких полигонов
+                linewidth = max(2.0, 3.0 - (area / 1e10))  # Динамическая толщина
+                gdf_poly.plot(
+                    ax=ax, 
+                    facecolor='white', 
+                    edgecolor='darkblue',
+                    linewidth=linewidth,
+                    alpha=0.5,
+                    zorder=5
+                )
+            else:
+                # Для линий и других геометрий
+                gdf_line = gpd.GeoDataFrame([row], crs=gdf.crs)
+                gdf_line.plot(
+                    ax=ax, 
+                    color='green', 
+                    linewidth=3,
+                    alpha=0.8,
+                    zorder=7
+                )
+        
+        # Автомасштабирование с учетом всех геометрий
+        if len(filtered_geometries) > 0:
+            # Получаем общие границы
+            all_bounds = gdf.total_bounds
+            
+            # Если есть и точки и полигоны - добавляем дополнительный буфер для точек
+            has_points = any(g.geom_type == "Point" for g in filtered_geometries)
+            has_polygons = any(g.geom_type in ["Polygon", "MultiPolygon"] for g in filtered_geometries)
+            
+            if has_points and has_polygons:
+                # Увеличиваем буфер для лучшей видимости точек
+                buffer = max(5000, (all_bounds[2] - all_bounds[0]) * 0.3)  # 30% от ширины
+            else:
+                buffer = max(3000, (all_bounds[2] - all_bounds[0]) * 0.1)  # 10% от ширины
+            
+            ax.set_xlim(all_bounds[0] - buffer, all_bounds[2] + buffer)
+            ax.set_ylim(all_bounds[1] - buffer, all_bounds[3] + buffer)
+        
+        # Добавляем базовую карту
         try:
-            # 1. Открываем файл для записи в бинарном режиме
+            self.add_basemap(ax)
+        except Exception:
+            pass
+        
+        # Отключаем оси (как было изначально)
+        ax.axis('off')
+        
+        # Сохранение карты с улучшенными настройками
+        filename = f"{place_name}.jpeg"
+        image_path = os.path.join(self.maps_dir, filename)
+        
+        try:
             with open(image_path, 'wb') as f:
-                # 2. Передаем в savefig не путь, а файловый объект f
                 plt.savefig(
                     f,
                     format='jpeg',
-                    dpi=180,
+                    dpi=500,  # Увеличили DPI для лучшего качества
                     bbox_inches='tight',
-                    pad_inches=0
+                    edgecolor='none',
+                    pad_inches=0,
+                    transparent=False
                 )
-                # 3. Принудительно сбрасываем буферы на диск, чтобы гарантировать запись
                 f.flush()
                 os.fsync(f.fileno())
         finally:
-            # 4. Гарантированно закрываем фигуру, чтобы освободить память
-            plt.close()
-        # --- КОНЕЦ ИСПРАВЛЕНИЙ ---
-
+            plt.close(fig)
+        
+        # Генерация интерактивной карты
         static_map_url = f"{self.domain}/maps/{filename}"
         web_app_url = self.generate_folium_map(geometry, place_name)
-
+        
         set_map_links(place_name, {
             "static": static_map_url,
             "interactive": web_app_url
         })
-
+        
         return static_map_url, web_app_url
 
     def fetch_and_draw(self, place: str, flag_if_exist: bool) -> List[Dict[str, Any]]:

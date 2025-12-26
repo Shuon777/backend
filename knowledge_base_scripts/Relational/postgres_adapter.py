@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from embedding_config import embedding_config, get_model_dimension
 
 class NewResourceImporter:
-    def __init__(self, use_embedding_stubs=False):
+    def __init__(self, use_embedding_stubs=False, incremental_mode=False):
         self.use_embedding_stubs = use_embedding_stubs  # Флаг для использования заглушек
         self.db_config = {
             "dbname": os.getenv("DB_NAME", "eco"),
@@ -31,6 +31,7 @@ class NewResourceImporter:
         self.missing_geometry_objects = set()
         current_model = os.getenv("EMBEDDING_MODEL", embedding_config.current_model)
         embedding_dimension = os.getenv("EMBEDDING_DIMENSION")
+        self.incremental_mode = incremental_mode
         
         if embedding_dimension:
             self.embedding_dimension = int(embedding_dimension)
@@ -1049,7 +1050,7 @@ class NewResourceImporter:
                 map_id = self.cur.fetchone()[0]
                 print(f"Создан map_content для {name} (id: {map_id})")
             
-            # Связываем map_content с географической сущностью
+            # Связываем map_content с географической сущности
             self.cur.execute(
                 """
                 INSERT INTO entity_geo 
@@ -1503,9 +1504,48 @@ class NewResourceImporter:
             import traceback
             traceback.print_exc()
             return None
-            
+
+    def _process_weather_for_image(self, feature_photo):
+        """Извлекает и форматирует погодные условия из feature_photo"""
+        weather_conditions = []
+        feature_data = {}
+        
+        # Добавляем облачность
+        cloudiness = feature_photo.get('cloudiness')
+        if cloudiness and cloudiness != 'Неопределено':
+            weather_conditions.append(f"Облачность: {cloudiness}")
+        
+        # Добавляем температуру
+        temperature = feature_photo.get('temperature')
+        if temperature and temperature != 'Неопределено':
+            weather_conditions.append(f"Температура: {temperature}")
+            try:
+                # Пробуем извлечь числовое значение температуры
+                temp_match = re.search(r'(\d+)', str(temperature))
+                if temp_match:
+                    feature_data['temperature_approx'] = float(temp_match.group(1))
+            except:
+                pass
+        
+        # Добавляем ветер
+        wind = feature_photo.get('wind')
+        if wind and wind != 'Неопределено':
+            weather_conditions.append(f"Ветер: {wind}")
+            feature_data['windy'] = any(word in wind.lower() for word in ['ветер', 'ветрен', 'ветрено', 'wind'])
+        
+        # Добавляем осадки
+        precipitation = feature_photo.get('precipitation')
+        if precipitation and precipitation != 'Неопределено':
+            weather_conditions.append(f"Осадки: {precipitation}")
+            feature_data['rain'] = any(word in precipitation.lower() for word in ['дождь', 'дожд', 'осадк', 'rain'])
+        
+        # Объединяем все условия в одну строку
+        weather_text = ', '.join(weather_conditions) if weather_conditions else None
+        
+        return weather_text, feature_data
+
     def process_image(self, resource):
-        """Обработка изображений с созданием географических сущностей"""
+        """Обработка изображений с созданием географических сущностей и обработкой погодных условий"""
         try:
             identificator = resource['identificator']
             access = resource.get('access_options', {})
@@ -1524,30 +1564,93 @@ class NewResourceImporter:
             elif baikal_relation is None:
                 baikal_relation = []
             
-            # Добавляем in_stoplist и baikal_relation в feature_data изображения
+            # Копируем feature_photo и добавляем дополнительные поля
             image_feature_data = feature_photo.copy() if feature_photo else {}
+            
+            # Добавляем основные поля
             image_feature_data['in_stoplist'] = in_stoplist_value
-            image_feature_data['baikal_relation'] = baikal_relation  # Добавляем baikal_relation
+            image_feature_data['baikal_relation'] = baikal_relation
+            image_feature_data['information_type'] = resource.get('information_type', '')
+            image_feature_data['information_subtype'] = resource.get('information_subtype', '')
             
-            # ... остальной код метода
+            # Добавляем идентификатор и доступные опции
+            image_feature_data['identificator'] = identificator
+            image_feature_data['access_options'] = access
             
-            self.cur.execute(
-                "INSERT INTO image_content (title, description, feature_data) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (
-                    title,
-                    feature_photo.get('image_caption'),
-                    Json(image_feature_data)
+            # Обрабатываем flower_and_fruit_info если есть
+            flower_info = feature_photo.get('flower_and_fruit_info')
+            if flower_info:
+                image_feature_data['flower_and_fruit_info'] = flower_info
+            
+            # Сохраняем новые поля биологических характеристик
+            biological_fields = [
+                'behavior', 'surface_type', 'placed', 'interaction', 
+                'mood', 'age', 'lifeform', 'sex'
+            ]
+            
+            for field in biological_fields:
+                value = feature_photo.get(field)
+                if value and value not in ['Неопределено', 'Неопределён']:
+                    image_feature_data[field] = value
+            
+            # ИЩЕМ ДУБЛИКАТЫ ПЕРЕД ВСТАВКОЙ
+            existing_image_id = self.find_existing_image(image_feature_data)
+            if existing_image_id:
+                print(f"⚠️  Изображение уже существует в БД (id: {existing_image_id}), обновляем...")
+                image_id = existing_image_id
+                
+                # Обновляем существующую запись
+                self.cur.execute(
+                    "UPDATE image_content SET title = %s, description = %s, feature_data = %s WHERE id = %s",
+                    (
+                        title,
+                        feature_photo.get('image_caption'),
+                        Json(image_feature_data),
+                        image_id
+                    )
                 )
-            )
-            image_id = self.cur.fetchone()[0]
+            else:
+                # Вставляем новую запись
+                self.cur.execute(
+                    "INSERT INTO image_content (title, description, feature_data) "
+                    "VALUES (%s, %s, %s) RETURNING id",
+                    (
+                        title,
+                        feature_photo.get('image_caption'),
+                        Json(image_feature_data)
+                    )
+                )
+                image_id = self.cur.fetchone()[0]
+            
             entity_type = 'image_content'
             
-            self.add_reliability('image_content', image_id, name_info.get('source'))
+            author_name = access.get('author')
+            if not author_name:
+                # Попробуем получить из feature_photo
+                author_name = feature_photo.get('author_photo')
+            
+            print(f"🔍 Поиск автора: {author_name}")
+            if author_name:
+                author_id = self.get_or_create_author(author_name)
+                print(f"✅ ID автора получен: {author_id}")
+                if author_id:
+                    self.cur.execute(
+                        "INSERT INTO entity_author (entity_id, entity_type, author_id) "
+                        "VALUES (%s, %s, %s) ON CONFLICT (entity_id, entity_type, author_id) DO NOTHING",
+                        (image_id, entity_type, author_id)
+                    )
+                    print(f"✅ Связь с автором создана для image_id={image_id}")
+            else:
+                print("⚠️  Автор не найден в ресурсе")
+            
+            # Добавляем информацию о достоверности только для новых записей
+            if not existing_image_id:
+                self.add_reliability('image_content', image_id, name_info.get('source'))
+            
+            # Создаем или обновляем идентификатор
             self.create_entity_identifier(image_id, entity_type, identificator, access)
             
-            # ... остальной код метода без изменений
-            
+            # Обработка автора
             author_name = access.get('author')
             if author_name:
                 author_id = self.get_or_create_author(author_name)
@@ -1558,6 +1661,7 @@ class NewResourceImporter:
                         (image_id, entity_type, author_id)
                     )
             
+            # Обработка даты съемки
             date_taken = feature_photo.get('date')
             if date_taken:
                 parsed_date = self.parse_date(date_taken)
@@ -1570,35 +1674,125 @@ class NewResourceImporter:
                     temporal_id = self.cur.fetchone()[0]
                     self.cur.execute(
                         "INSERT INTO entity_temporal (entity_id, entity_type, temporal_id) "
-                        "VALUES (%s, %s, %s)",
+                        "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
                         (image_id, entity_type, temporal_id)
                     )
             
-            classification = feature_photo.get('classification_info')
-            if classification:
-                information_subtype = resource.get('information_subtype')
-                self.process_biological_entity(
+            # Обработка погодных условий из новых полей
+            if any(field in feature_photo for field in ['cloudiness', 'temperature', 'wind', 'precipitation']):
+                weather_text, weather_features = self._process_weather_for_image(feature_photo)
+                
+                if weather_text:
+                    try:
+                        # Извлекаем параметры погоды
+                        windy = weather_features.get('windy', False)
+                        rain = weather_features.get('rain', False)
+                        temperature_approx = weather_features.get('temperature_approx')
+                        
+                        # Создаем запись о погоде
+                        self.cur.execute(
+                            """
+                            INSERT INTO weather_reference 
+                            (weather_conditions, windy, rain, temperature_approx, timestamp)
+                            VALUES (%s, %s, %s, %s, %s) 
+                            RETURNING id
+                            """,
+                            (weather_text, windy, rain, temperature_approx, parsed_date or datetime.now())
+                        )
+                        weather_id = self.cur.fetchone()[0]
+                        
+                        # Связываем с изображением
+                        self.cur.execute(
+                            "INSERT INTO entity_weather (entity_id, entity_type, weather_id) "
+                            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                            (image_id, entity_type, weather_id)
+                        )
+                        
+                        print(f"✅ Обработаны погодные условия для изображения {image_id}: {weather_text}")
+                    except Exception as e:
+                        print(f"⚠️ Ошибка обработки погодных условий: {e}")
+            
+            # Обработка биологических сущностей - ВАЖНОЕ ИСПРАВЛЕНИЕ
+            classification = feature_photo.get('classification_info', {})
+            result_info = classification.get('result', {}) if classification else {}
+            
+            # Определяем тип информации для биологической сущности
+            information_subtype = resource.get('information_subtype')
+            if not information_subtype:
+                # Пытаемся определить тип из feature_photo
+                flora_type = feature_photo.get('flora_type')
+                fauna_type = feature_photo.get('fauna_type')
+                
+                if flora_type and flora_type != 'Неопределено':
+                    information_subtype = 'Объект флоры'
+                elif fauna_type and fauna_type != 'Неопределено':
+                    information_subtype = 'Объект фауны'
+                elif 'flora' in str(resource.get('information_type', '')).lower():
+                    information_subtype = 'Объект флоры'
+                elif 'fauna' in str(resource.get('information_type', '')).lower():
+                    information_subtype = 'Объект фауны'
+            
+            # Создаем биологическую сущность если есть классификация или имя
+            if result_info or (name_info.get('common') and information_subtype):
+                bio_id = self.process_biological_entity(
                     image_id, 
                     entity_type,
                     name_info,
-                    classification,
+                    result_info,  # Передаем result_info как classification
                     feature_photo,
                     information_subtype
                 )
+                
+                if bio_id:
+                    print(f"✅ Создана/найдена биологическая сущность {bio_id} для изображения {image_id}")
             
+            # Обработка географических данных
             location = feature_photo.get('location', {})
             if location:
-                self.process_geographical_data(
+                geo_id = self.process_geographical_data(
                     image_id, 
                     entity_type,
                     location,
                     name_info
                 )
-                
+                if geo_id:
+                    print(f"✅ Создана/найдена географическая сущность {geo_id} для изображения {image_id}")
+            
+            mode = "обновлено" if existing_image_id else "создано"
+            print(f"✅ {mode.capitalize()} изображение: {title} (id: {image_id})")
             return image_id
             
         except Exception as e:
-            print(f"Error processing image: {e}")
+            print(f"❌ Error processing image: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def find_existing_image(self, feature_data):
+        """Ищет существующее изображение по ключевым полям"""
+        try:
+            name_photo = feature_data.get('name_photo')
+            author_photo = feature_data.get('author_photo')
+            date = feature_data.get('date')
+            
+            if not name_photo:
+                return None
+            
+            # Ищем по комбинации полей
+            self.cur.execute(
+                "SELECT id FROM image_content "
+                "WHERE feature_data->>'name_photo' = %s "
+                "AND feature_data->>'author_photo' = %s "
+                "AND feature_data->>'date' = %s "
+                "LIMIT 1",
+                (name_photo, author_photo, date)
+            )
+            
+            result = self.cur.fetchone()
+            return result[0] if result else None
+            
+        except Exception as e:
+            print(f"Error finding existing image: {e}")
             return None
 
     def process_weather(self, entity_id, entity_type, weather_conditions):
@@ -1859,17 +2053,33 @@ class NewResourceImporter:
         
         return bio_id
 
-    def import_resources(self, json_file):
-        """Основной метод импорта с улучшенным управлением транзакциями"""
+    def import_resources(self, json_file, incremental_mode=False):
+        """Основной метод импорта с поддержкой инкрементального режима"""
+        self.incremental_mode = incremental_mode
+        
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
         success_count = 0
         error_count = 0
+        skipped_count = 0
+        
+        # Если инкрементальный режим, получаем хэши существующих ресурсов
+        existing_hashes = set()
+        if self.incremental_mode:
+            existing_hashes = self.get_existing_resource_hashes()
         
         for i, resource in enumerate(data['resources'], 1):
             try:
                 print(f"\nProcessing resource {i}/{len(data['resources'])}: {resource.get('type')}")
+                
+                # Проверяем дубликаты в инкрементальном режиме
+                if self.incremental_mode:
+                    resource_hash = self.calculate_resource_hash(resource)
+                    if resource_hash in existing_hashes:
+                        print(f"Resource already exists, skipping...")
+                        skipped_count += 1
+                        continue
                 
                 rtype = resource['type']
                 if rtype == 'Изображение':
@@ -1903,7 +2113,82 @@ class NewResourceImporter:
                 self.bio_entity_cache = {}
 
         mode_info = " (режим заглушек эмбеддингов)" if self.use_embedding_stubs else ""
-        print(f"\nImport completed{mode_info}. Success: {success_count}, Errors: {error_count}")
+        inc_info = " (инкрементальный режим)" if self.incremental_mode else ""
+        print(f"\nImport completed{mode_info}{inc_info}. Success: {success_count}, Skipped: {skipped_count}, Errors: {error_count}")
+        return success_count, skipped_count, error_count
+    
+    def calculate_resource_hash(self, resource):
+        """Создает хэш для ресурса для сравнения"""
+        import hashlib
+        import json
+        
+        # Создаем упрощенное представление ресурса для хэширования
+        hash_data = {
+            'type': resource.get('type'),
+            'identificator': resource.get('identificator', {}),
+            'access_options': resource.get('access_options', {}),
+            'feature_data': resource.get('feature_data', {}) if resource.get('type') != 'Изображение' else None,
+            'featurePhoto': resource.get('featurePhoto', {}) if resource.get('type') == 'Изображение' else None
+        }
+        
+        # Преобразуем в строку и хэшируем
+        data_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(data_str.encode('utf-8')).hexdigest()
+    
+    def get_existing_resource_hashes(self):
+        """Получает хэши уже существующих ресурсов из базы данных"""
+        existing_hashes = set()
+        
+        try:
+            # Для изображений
+            self.cur.execute(
+                """
+                SELECT md5(concat(
+                    COALESCE(feature_data->>'name_photo', ''),
+                    COALESCE(feature_data->>'author_photo', ''),
+                    COALESCE(feature_data->>'date', ''),
+                    COALESCE(feature_data->>'image_caption', '')
+                )) as hash
+                FROM image_content
+                """
+            )
+            for row in self.cur.fetchall():
+                existing_hashes.add(row[0])
+            
+            # Для текстов
+            self.cur.execute(
+                """
+                SELECT md5(concat(
+                    COALESCE(title, ''),
+                    COALESCE(feature_data->>'source', ''),
+                    COALESCE(feature_data->>'baikal_relation', ''),
+                    COALESCE(content, '')
+                )) as hash
+                FROM text_content
+                """
+            )
+            for row in self.cur.fetchall():
+                existing_hashes.add(row[0])
+            
+            # Для географических объектов
+            self.cur.execute(
+                """
+                SELECT md5(concat(
+                    COALESCE(name_ru, ''),
+                    COALESCE(type, ''),
+                    COALESCE(feature_data->>'source', ''),
+                    COALESCE(feature_data->>'geo_entity_type', '')
+                )) as hash
+                FROM geographical_entity
+                """
+            )
+            for row in self.cur.fetchall():
+                existing_hashes.add(row[0])
+                
+        except Exception as e:
+            print(f"Error fetching existing resource hashes: {e}")
+        
+        return existing_hashes
             
     def run(self, json_file):
         try:
@@ -1917,25 +2202,211 @@ class NewResourceImporter:
             traceback.print_exc()
         finally:
             self.disconnect()
+def incremental_import_resources(self, json_file):
+    """Инкрементальный импорт новых ресурсов без очистки БД"""
+    with open(json_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    success_count = 0
+    error_count = 0
+    skipped_count = 0
+    
+    # Получаем список уже существующих ресурсов для проверки дубликатов
+    existing_resources = self.get_existing_resources()
+    
+    for i, resource in enumerate(data['resources'], 1):
+        try:
+            print(f"\nProcessing resource {i}/{len(data['resources'])}: {resource.get('type')}")
+            
+            # Проверяем, существует ли уже такой ресурс
+            if self.is_duplicate_resource(resource, existing_resources):
+                print(f"Resource already exists, skipping...")
+                skipped_count += 1
+                continue
+            
+            rtype = resource['type']
+            if rtype == 'Изображение':
+                result = self.process_image(resource)
+            elif rtype == 'Текст':
+                result = self.process_text(resource)
+            elif rtype == 'Картографическая информация':
+                result = self.process_map(resource)
+            elif rtype == 'Географический объект':
+                result = self.process_geographical_object(resource)
+            else:
+                print(f"Unknown resource type: {rtype}")
+                result = None
+            
+            if result:
+                self.conn.commit()
+                success_count += 1
+            else:
+                self.conn.rollback()
+                error_count += 1
+            
+        except Exception as e:
+            print(f"Error processing resource {i}: {e}")
+            import traceback
+            traceback.print_exc()
+            self.conn.rollback()
+            error_count += 1
+            # Сброс кэшей при ошибке
+            self.entity_cache = {}
+            self.author_cache = {}
+            self.bio_entity_cache = {}
+
+    mode_info = " (режим заглушек эмбеддингов)" if self.use_embedding_stubs else ""
+    print(f"\nIncremental import completed{mode_info}. Success: {success_count}, Skipped: {skipped_count}, Errors: {error_count}")
+    return success_count, skipped_count, error_count
+
+def get_existing_resources(self):
+    """Получает список уже существующих ресурсов для проверки дубликатов"""
+    existing_resources = {
+        'images': set(),
+        'texts': set(),
+        'geographical': set()
+    }
+    
+    try:
+        # Получаем существующие изображения
+        self.cur.execute(
+            "SELECT i.feature_data->>'name_photo', i.feature_data->>'author_photo', i.feature_data->>'date' "
+            "FROM image_content i"
+        )
+        for row in self.cur.fetchall():
+            existing_resources['images'].add(row)
+        
+        # Получаем существующие тексты
+        self.cur.execute(
+            "SELECT t.title, t.feature_data->>'source', t.structured_data->>'metadata'->>'import_timestamp' "
+            "FROM text_content t"
+        )
+        for row in self.cur.fetchall():
+            existing_resources['texts'].add(row)
+        
+        # Получаем существующие географические объекты
+        self.cur.execute(
+            "SELECT g.name_ru, g.type, g.feature_data->>'source' "
+            "FROM geographical_entity g"
+        )
+        for row in self.cur.fetchall():
+            existing_resources['geographical'].add(row)
+            
+    except Exception as e:
+        print(f"Error fetching existing resources: {e}")
+    
+    return existing_resources
+
+def is_duplicate_resource(self, resource, existing_resources):
+    """Проверяет, является ли ресурс дубликатом"""
+    rtype = resource.get('type')
+    
+    if rtype == 'Изображение':
+        # Для изображений проверяем по имени файла, автору и дате
+        feature_photo = resource.get('featurePhoto', {})
+        name_photo = feature_photo.get('name_photo', '')
+        author_photo = feature_photo.get('author_photo', '')
+        date = feature_photo.get('date', '')
+        
+        for existing in existing_resources['images']:
+            if (existing[0] == name_photo and 
+                existing[1] == author_photo and 
+                existing[2] == date):
+                return True
+                
+    elif rtype == 'Текст':
+        # Для текстов проверяем по заголовку и источнику
+        title = resource.get('identificator', {}).get('name', {}).get('common', '')
+        source = resource.get('identificator', {}).get('name', {}).get('source', '')
+        
+        for existing in existing_resources['texts']:
+            if existing[0] == title and existing[1] == source:
+                return True
+                
+    elif rtype == 'Географический объект':
+        # Для географических объектов проверяем по имени и типу
+        name = resource.get('identificator', {}).get('name', {}).get('common', '')
+        geo_type = resource.get('geo_entity_type', '')
+        source = resource.get('identificator', {}).get('name', {}).get('source', '')
+        
+        for existing in existing_resources['geographical']:
+            if (existing[0] == name and 
+                existing[1] == geo_type and 
+                existing[2] == source):
+                return True
+    
+    return False
 
 def main():
     """Основная функция с парсингом аргументов командной строки"""
     parser = argparse.ArgumentParser(description='Импорт ресурсов в базу данных')
     parser.add_argument('--use-stubs', action='store_true', 
                        help='Использовать заглушки для эмбеддингов вместо реальной генерации')
+    parser.add_argument('--full', action='store_true',
+                       help='Полная перезагрузка базы данных (очистка и создание заново)')
+    parser.add_argument('--incremental', action='store_true',
+                       help='Инкрементальный импорт без очистки базы')
     parser.add_argument('--json-file', default='../../json_files/resources_dist.json',
                        help='Путь к JSON файлу с ресурсами')
     
     args = parser.parse_args()
     
-    importer = NewResourceImporter(use_embedding_stubs=args.use_stubs)
+    # Если не указан ни один режим, используем инкрементальный по умолчанию
+    if not args.full and not args.incremental:
+        args.incremental = True
+    
+    # Если указаны оба режима, приоритет у --full
+    if args.full and args.incremental:
+        print("⚠️  Указаны оба режима --full и --incremental, используется --full")
+        args.incremental = False
+    
+    importer = NewResourceImporter(
+        use_embedding_stubs=args.use_stubs, 
+        incremental_mode=args.incremental
+    )
+    
     try:
         importer.connect()
-        importer.import_resources(args.json_file)
+        
+        # Выбираем режим работы
+        if args.full:
+            print("🔄 Режим: полная перезагрузка базы данных")
+            # Сначала очищаем таблицы
+            importer.cur.execute("""
+                TRUNCATE TABLE 
+                    image_content, text_content, map_content, biological_entity, 
+                    geographical_entity, entity_relation, entity_author, author, 
+                    entity_identifier, entity_identifier_link, reliability, entity_geo,
+                    external_link, temporal_reference, entity_temporal, 
+                    weather_reference, entity_weather, park_reference, entity_park,
+                    ecological_reference, entity_ecological, territorial_reference,
+                    entity_territorial
+                CASCADE;
+            """)
+            importer.conn.commit()
+            print("✅ Таблицы очищены")
+        
+        # Импортируем ресурсы
+        success, skipped, errors = importer.import_resources(args.json_file)
+        
         importer.save_missing_geometry_objects()
-        print("Импорт успешно завершен!")
+        
+        print(f"\nИмпорт завершен:")
+        print(f"  Успешно: {success}")
+        print(f"  Пропущено (дубликаты): {skipped}")
+        print(f"  Ошибок: {errors}")
+        print(f"  Режим: {'полный' if args.full else 'инкрементальный'}")
+        print(f"  Заглушки эмбеддингов: {'да' if args.use_stubs else 'нет'}")
+        
+        return 0 if errors == 0 else 1
+        
+    except Exception as e:
+        print(f"❌ Ошибка при импорте: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
     finally:
         importer.disconnect()
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
