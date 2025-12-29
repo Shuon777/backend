@@ -22,8 +22,7 @@ class SearchService:
     def __init__(
     self, 
     embedding_model_path: str,
-    llm_service: Optional[Any] = None,
-    species_synonyms_path: Optional[str] = None
+    llm_service: Optional[Any] = None
 ):
         """
         Args:
@@ -33,16 +32,14 @@ class SearchService:
         """
         self.embedding_model_path = embedding_model_path
         self.llm_service = llm_service or get_gigachat()
-        self.relational_service = RelationalService(species_synonyms_path)
+        self.relational_service = RelationalService()
         self.geo_service = GeoService()
-        self.species_synonyms = self._load_species_synonyms(species_synonyms_path)
-        self._build_reverse_synonyms_index()
         self.embedding_model = HuggingFaceEmbeddings(
             model_name=embedding_model_path,
             model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': False}
         )
-        self.object_synonyms = self._load_object_synonyms(species_synonyms_path)
+        self.object_synonyms = self._load_object_synonyms()
         self._build_reverse_object_synonyms_index()
         
     def _init_gigachat(self):
@@ -54,9 +51,8 @@ class SearchService:
             self.llm_service = get_gigachat()
         return self.llm_service
     
-    def _load_object_synonyms(self, file_path: Optional[str] = None):
+    def _load_object_synonyms(self):
         """Загружает синонимы объектов из JSON файла"""
-        # Игнорируем переданный file_path и всегда используем object_synonyms.json
         base_dir = Path(__file__).parent.parent
         file_path = base_dir / "json_files" / "object_synonyms.json"
         
@@ -72,7 +68,6 @@ class SearchService:
                 synonyms = json.load(f)
             logger.info(f"Успешно загружено {len(synonyms)} типов объектов")
             
-            # Логируем структуру для отладки
             for obj_type, type_synonyms in synonyms.items():
                 if isinstance(type_synonyms, dict):
                     logger.info(f"Тип: {obj_type}, количество записей: {len(type_synonyms)}")
@@ -88,25 +83,6 @@ class SearchService:
             return {}
 
         
-    def _load_species_synonyms(self, file_path: Optional[str] = None):
-        """Загружает синонимы видов из JSON файла"""
-        if file_path is None:
-            base_dir = Path(__file__).parent.parent
-            file_path = base_dir / "json_files" / "species_synonyms.json"
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            logger.error(f"Файл синонимов не найден: {file_path}")
-            return {}
-        except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга JSON файла синонимов: {e}")
-            return {}
-        except Exception as e:
-            logger.error(f"Ошибка загрузки синонимов: {e}")
-            return {}
-        
     def _build_reverse_object_synonyms_index(self):
         """Создает обратный индекс для быстрого поиска по синонимам объектов"""
         logger.info(f"Начало построения индекса синонимов объектов")
@@ -116,32 +92,26 @@ class SearchService:
         
         if not self.object_synonyms:
             logger.warning("Нет данных синонимов для построения индекса")
-            return
+            return {}
         
-        
-        # Проверяем структуру object_synonyms
         if not isinstance(self.object_synonyms, dict):
             logger.error(f"object_synonyms должен быть словарем, получен: {type(self.object_synonyms)}")
-            return
+            return {}
         
         for object_type, type_synonyms in self.object_synonyms.items():
-            # Проверяем, что type_synonyms является словарем
             if not isinstance(type_synonyms, dict):
                 logger.warning(f"type_synonyms для типа '{object_type}' должен быть словарем, получен: {type(type_synonyms)}. Пропускаем.")
                 continue
                 
             for main_name, synonyms in type_synonyms.items():
-                # Проверяем, что synonyms является списком
                 if not isinstance(synonyms, list):
                     logger.warning(f"synonyms для '{main_name}' должен быть списком, получен: {type(synonyms)}. Пропускаем.")
                     continue
                     
-                # Добавляем основную форму в индекс
                 normalized_main = main_name.lower()
                 if normalized_main not in self.reverse_object_synonyms:
                     self.reverse_object_synonyms[normalized_main] = []
                 
-                # Проверяем, нет ли уже такой записи
                 existing_entry = next((item for item in self.reverse_object_synonyms[normalized_main] 
                                     if item["main_form"] == main_name and item["type"] == object_type), None)
                 if not existing_entry:
@@ -150,13 +120,11 @@ class SearchService:
                         "type": object_type
                     })
                 
-                # Добавляем все синонимы в индекс
                 for synonym in synonyms:
                     normalized_synonym = synonym.lower()
                     if normalized_synonym not in self.reverse_object_synonyms:
                         self.reverse_object_synonyms[normalized_synonym] = []
                     
-                    # Проверяем, нет ли уже такой записи для синонима
                     existing_synonym_entry = next((item for item in self.reverse_object_synonyms[normalized_synonym] 
                                                 if item["main_form"] == main_name and item["type"] == object_type), None)
                     if not existing_synonym_entry:
@@ -164,6 +132,7 @@ class SearchService:
                             "main_form": main_name,
                             "type": object_type
                         })
+        return self.reverse_object_synonyms
                         
     def resolve_object_synonym(self, object_name: str, object_type: str = "all") -> Dict[str, Any]:
         """
@@ -173,7 +142,6 @@ class SearchService:
             return {"error": "Название объекта не указано"}
         
         try:
-            # Если индекс синонимов не построен, возвращаем оригинальное название
             if not hasattr(self, 'reverse_object_synonyms') or not self.reverse_object_synonyms:
                 logger.warning("Индекс синонимов объектов не построен")
                 return {
@@ -185,11 +153,9 @@ class SearchService:
             
             normalized_name = object_name.lower()
             
-            # Ищем в обратном индексе
             if normalized_name in self.reverse_object_synonyms:
                 matches = self.reverse_object_synonyms[normalized_name]
                 
-                # Если указан конкретный тип, фильтруем по нему
                 if object_type != "all":
                     filtered_matches = [m for m in matches if m["type"] == object_type]
                     if filtered_matches:
@@ -200,7 +166,6 @@ class SearchService:
                             "resolved": True
                         }
                 
-                # Если тип не указан или не нашли по указанному типу, берем первый попавшийся
                 if matches:
                     return {
                         "main_form": matches[0]["main_form"],
@@ -209,9 +174,7 @@ class SearchService:
                         "resolved": True
                     }
             
-            # Проверяем прямое совпадение с основными формами
             if object_type != "all":
-                # Ищем в конкретном типе
                 if object_type in self.object_synonyms:
                     type_synonyms = self.object_synonyms[object_type]
                     if isinstance(type_synonyms, dict):
@@ -224,7 +187,6 @@ class SearchService:
                                     "resolved": True
                                 }
             else:
-                # Ищем во всех типах
                 for obj_type, type_synonyms in self.object_synonyms.items():
                     if isinstance(type_synonyms, dict):
                         for main_form, synonyms in type_synonyms.items():
@@ -236,7 +198,6 @@ class SearchService:
                                     "resolved": True
                                 }
             
-            # Не нашли синоним
             return {
                 "main_form": object_name,
                 "object_type": object_type,
@@ -253,19 +214,9 @@ class SearchService:
                 "resolved": False
             }
         
-    def _build_reverse_synonyms_index(self):
-        """Создает обратный индекс для быстрого поиска по синонимам"""
-        self.reverse_synonyms = {}
-        for main_name, synonyms in self.species_synonyms.items():
-            for synonym in synonyms:
-                normalized_synonym = synonym.lower()
-                if normalized_synonym not in self.reverse_synonyms:
-                    self.reverse_synonyms[normalized_synonym] = []
-                self.reverse_synonyms[normalized_synonym].append(main_name)
-                
     def get_synonyms_for_name(self, name: str) -> Dict[str, Any]:
         """
-        Возвращает все синонимы для заданного названия
+        Возвращает все синонимы для заданного названия вида
         Args:
             name: Название вида (может быть любым синонимом)
         Returns:
@@ -273,29 +224,34 @@ class SearchService:
         """
         if not name:
             return {"error": "Название не указано"}
+        
         normalized_name = name.lower()
-        main_forms = self.reverse_synonyms.get(normalized_name, [])
-        if not main_forms:
-            for main_name, synonyms in self.species_synonyms.items():
-                if main_name.lower() == normalized_name:
-                    main_forms = [main_name]
-                    break
         
-        if not main_forms:
-            return {"error": f"Название '{name}' не найдено в базе синонимов"}
+        if normalized_name in self.reverse_object_synonyms:
+            records = self.reverse_object_synonyms[normalized_name]
+            bio_records = [r for r in records if r["type"] == "biological_entity"]
+            
+            result = {}
+            for record in bio_records:
+                main_form = record["main_form"]
+                synonyms = self.object_synonyms.get("biological_entity", {}).get(main_form, [])
+                result[main_form] = synonyms
+            
+            if result:
+                return result
         
-        result = {}
-        for main_form in main_forms:
-            result[main_form] = self.species_synonyms.get(main_form, [])
+        if normalized_name in self.object_synonyms.get("biological_entity", {}):
+            main_form = normalized_name
+            synonyms = self.object_synonyms["biological_entity"][main_form]
+            return {main_form: synonyms}
         
-        return result
+        return {"error": f"Название '{name}' не найдено в базе синонимов"}
     
     def get_object_descriptions(self, object_name: str, object_type: str = "all", in_stoplist: str = "1") -> List[str]:
         """Получает все текстовые описания по названию объекта любого типа с учетом in_stoplist"""
         try:
             all_descriptions = []
             
-            # Определяем типы объектов для поиска
             search_types = []
             if object_type == "all":
                 search_types = ["biological_entity", "geographical_entity", "modern_human_made","organization","research_project","volunteer_initiative","ancient_human_made"]
@@ -303,7 +259,6 @@ class SearchService:
                 search_types = [object_type]
             
             for entity_type in search_types:
-                # Для всех типов объектов используем реляционный сервис
                 descriptions = self.relational_service.get_object_descriptions(object_name, entity_type, in_stoplist=in_stoplist)
                 if descriptions:
                     all_descriptions.extend(descriptions)
@@ -319,7 +274,7 @@ class SearchService:
     object_type: str = "all",
     limit: int = 10,
     in_stoplist: str = "1",
-    object_name: Optional[str] = None  # Добавляем параметр для точного поиска
+    object_name: Optional[str] = None
 ) -> List[Dict]:
         """
         Поиск описаний объектов по фильтрам из JSON body с учетом in_stoplist
@@ -331,7 +286,7 @@ class SearchService:
                 object_type=object_type,
                 limit=limit,
                 in_stoplist=in_stoplist,
-                object_name=object_name  # Передаем object_name для точного поиска
+                object_name=object_name
             )
                 
         except Exception as e:
@@ -347,7 +302,6 @@ class SearchService:
         try:
             all_descriptions = []
             
-            # Определяем типы объектов для поиска
             search_types = []
             if object_type == "all":
                 search_types = ["biological_entity", "geographical_entity", "modern_human_made","organization","research_project","volunteer_initiative","ancient_human_made"]
@@ -355,14 +309,12 @@ class SearchService:
                 search_types = [object_type]
             
             for entity_type in search_types:
-                # Для всех типов объектов используем реляционный сервис
                 descriptions = self.relational_service.get_object_descriptions_with_embedding(
                     object_name, entity_type, query_embedding, limit, similarity_threshold, in_stoplist
                 )
                 if descriptions:
                     all_descriptions.extend(descriptions)
             
-            # Сортируем по схожести и ограничиваем количество
             all_descriptions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
             return all_descriptions[:limit]
                 
@@ -383,7 +335,6 @@ class SearchService:
         try:
             all_descriptions = []
             
-            # Определяем типы объектов для поиска
             search_types = []
             if object_type == "all":
                 search_types = ["biological_entity", "geographical_entity", "modern_human_made", 
@@ -392,7 +343,6 @@ class SearchService:
                 search_types = [object_type]
             
             for entity_type in search_types:
-                # Используем существующий метод реляционного сервиса для поиска по эмбеддингу
                 descriptions = self.relational_service.search_objects_by_embedding_only(
                     query_embedding=query_embedding,
                     object_type=entity_type,
@@ -403,7 +353,6 @@ class SearchService:
                 if descriptions:
                     all_descriptions.extend(descriptions)
             
-            # Сортируем по схожести и ограничиваем количество
             all_descriptions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
             return all_descriptions[:limit]
                 
@@ -438,39 +387,31 @@ class SearchService:
         try:
             chain = prompt | llm
             
-            # Получаем полный ответ с метаданными
             response = chain.invoke({"question": question, "context": context})
             
-            # ДИАГНОСТИКА: Логируем всю структуру ответа
             logger.debug(f"Полный ответ GigaChat: {response}")
             logger.debug(f"Тип ответа: {type(response)}")
             
-            # Проверяем различные возможные места для finish_reason
             finish_reason = None
             
-            # 1. Проверяем response_metadata
             if hasattr(response, 'response_metadata'):
                 logger.debug(f"response_metadata: {response.response_metadata}")
                 finish_reason = response.response_metadata.get('finish_reason')
             
-            # 2. Проверяем другие возможные атрибуты
             if not finish_reason and hasattr(response, 'llm_output'):
                 logger.debug(f"llm_output: {response.llm_output}")
                 if isinstance(response.llm_output, dict):
                     finish_reason = response.llm_output.get('finish_reason')
             
-            # 3. Проверяем атрибуты самого объекта
             if not finish_reason and hasattr(response, 'finish_reason'):
                 finish_reason = response.finish_reason
                 
-            # 4. Проверяем дополнительные метаданные
             if not finish_reason and hasattr(response, 'additional_kwargs'):
                 logger.debug(f"additional_kwargs: {response.additional_kwargs}")
                 finish_reason = response.additional_kwargs.get('finish_reason')
             
             logger.debug(f"Найден finish_reason: {finish_reason}")
             
-            # Возвращаем словарь с ответом и метаданными
             return {
                 "content": response.content.strip() if hasattr(response, 'content') else "",
                 "finish_reason": finish_reason,
@@ -480,12 +421,10 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка генерации ответа GigaChat: {str(e)}")
             
-            # ДИАГНОСТИКА: Логируем полную информацию об ошибке
             logger.debug(f"Тип исключения: {type(e)}")
             if hasattr(e, 'response'):
                 logger.debug(f"Response в исключении: {e.response}")
             
-            # Проверяем, содержит ли ошибка информацию о blacklist
             error_str = str(e).lower()
             
             return {
@@ -504,26 +443,22 @@ class SearchService:
         Поиск изображений по названию вида и признакам
         """
         try:
-            # ИСПРАВЛЕНИЕ: Используем resolve_object_synonym для правильного разрешения синонимов
             resolved_synonym = self.resolve_object_synonym(species_name, "biological_entity")
             
             logger.info(f"🔍 Разрешение синонима для '{species_name}': {resolved_synonym}")
             
-            # Получаем основное название из разрешенного синонима
             main_name = resolved_synonym.get("main_form", species_name)
             object_type = resolved_synonym.get("object_type", "biological_entity")
             
-            # ИСПРАВЛЕНИЕ: Получаем синонимы для основного названия
             synonyms_data = self.get_synonyms_for_name(main_name)
             
-            # Если не нашли синонимы, используем исходное название
             if "error" in synonyms_data:
                 synonyms_data = {main_name: []}
             
             logger.info(f"✅ Основное название: '{main_name}', синонимы: {synonyms_data}")
             
             return self.relational_service.search_images_by_features(
-                species_name=main_name,  # Используем основное название
+                species_name=main_name,
                 features=features,
                 synonyms_data=synonyms_data
             )
@@ -544,7 +479,6 @@ class SearchService:
                 for main_form, synonyms in synonyms_data.items():
                     all_names = [main_form] + synonyms
                     for name in all_names:
-                        # Используем реляционный сервис с учетом in_stoplist
                         descriptions = self.relational_service.get_text_descriptions_with_filters(
                             name, in_stoplist=in_stoplist
                         )
@@ -617,21 +551,17 @@ class SearchService:
             if response.get("no_relevant_descriptions", False):
                 return []
                 
-            # Безопасная обработка индексов
             relevant_indices = []
             raw_indices = response.get("relevant_descriptions", [])
             
             logger.debug(f"Raw indices from LLM: {raw_indices}, type: {type(raw_indices)}")
             
-            # Обработка различных форматов ответа
             if isinstance(raw_indices, (int, str)):
                 raw_indices = [raw_indices]
                 
             for idx in raw_indices:
                 try:
-                    # Если это строка, пытаемся преобразовать в число
                     if isinstance(idx, str):
-                        # Обработка строковых представлений срезов
                         if ':' in idx:
                             try:
                                 parts = idx.split(':')
@@ -645,21 +575,19 @@ class SearchService:
                             except ValueError:
                                 continue
                         else:
-                            # Обычное число в строке
                             try:
                                 num_idx = int(idx)
                                 if 0 <= num_idx < len(descriptions):
                                     relevant_indices.append(num_idx)
                             except ValueError:
                                 continue
-                    # Если это число
                     elif isinstance(idx, int):
                         if 0 <= idx < len(descriptions):
                             relevant_indices.append(idx)
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Invalid index '{idx}': {e}")
                     continue
-            # Убираем дубликаты и сортируем
+
             relevant_indices = sorted(set(relevant_indices))
             if not relevant_indices:
                 logger.debug("No relevant indices found after processing")
@@ -679,14 +607,13 @@ class SearchService:
     object_subtype: Optional[str] = None,
     object_name: Optional[str] = None,
     limit: int = 70,
-    search_around: bool = False,  # Новый параметр
-    buffer_radius_km: float = 10.0  # Новый параметр
+    search_around: bool = False,
+    buffer_radius_km: float = 10.0
 ) -> Dict[str, Any]:
         """
         Поиск объектов в заданной области с фильтрацией по типу и имени
         """
         try:
-            # Используем реляционный сервис для выполнения сложного запроса
             results = self.relational_service.get_objects_in_area_by_type(
                 area_geometry=area_geometry,
                 object_type=object_type,
@@ -698,7 +625,6 @@ class SearchService:
             )
             
             if not results:
-                # Формируем понятное сообщение в зависимости от критериев поиска
                 if object_name:
                     message = f"Объект '{object_name}' не найден в указанной области"
                 elif object_type:
@@ -713,11 +639,9 @@ class SearchService:
                     "area_geometry": area_geometry
                 }
             
-            # Статистика по расположению объектов
             inside_count = len([obj for obj in results if obj.get('location_type') == 'inside'])
             around_count = len([obj for obj in results if obj.get('location_type') == 'around'])
             
-            # Формируем ответное сообщение
             if object_name:
                 message = f"Найден объект '{object_name}'"
             else:
@@ -725,7 +649,6 @@ class SearchService:
                 subtype_msg = f" (подтип: {object_subtype})" if object_subtype else ""
                 message = f"Найдено {len(results)} объектов {type_msg}{subtype_msg}"
             
-            # Добавляем информацию о расположении
             if search_around and around_count > 0:
                 location_msg = f" ({inside_count} внутри области, {around_count} в радиусе {buffer_radius_km} км)"
             else:
@@ -762,18 +685,8 @@ class SearchService:
 ) -> Dict[str, Any]:
         """
         Прямой поиск объектов по имени без привязки к области
-        
-        Args:
-            object_name: Название объекта для поиска
-            object_type: Тип объекта (опционально)
-            object_subtype: Подтип объекта (опционально)
-            limit: Максимальное количество результатов
-            
-        Returns:
-            Результаты поиска объектов
         """
         try:
-            # Используем реляционный сервис для поиска объектов по имени
             results = self.relational_service.search_objects_by_name(
                 object_name=object_name,
                 object_type=object_type,
@@ -809,38 +722,28 @@ class SearchService:
 ) -> Dict[str, Any]:
         """Поиск объектов внутри полигона и в буферной зоне с поддержкой подтипов"""
         try:
-            # === ОПТИМИЗАЦИЯ НАЧАЛО ===
-            # Упрощаем полигон перед отправкой в БД.
-            # Для больших объектов (как Байкал) это критически важно для производительности ST_DWithin/ST_Distance.
             try:
                 original_shape = shape(polygon_geojson)
-                # tolerance=0.001 градуса (~111 метров). Это сохраняет форму, но убирает лишние детали береговой линии.
-                # Для поиска объектов в масштабах озера этого более чем достаточно.
                 simplified_shape = original_shape.simplify(0.001, preserve_topology=True)
                 optimized_polygon_geojson = mapping(simplified_shape)
                 
-                # Логируем степень сжатия для отладки
                 orig_coords = str(polygon_geojson)[:100]
                 simp_coords = str(optimized_polygon_geojson)[:100]
                 logger.info(f"📐 Полигон оптимизирован для поиска.")
             except Exception as e:
                 logger.warning(f"Не удалось упростить полигон, используем оригинал: {e}")
                 optimized_polygon_geojson = polygon_geojson
-            # === ОПТИМИЗАЦИЯ КОНЕЦ ===
 
-            # Получаем полную информацию об объектах с названиями геообъектов
             results = self.geo_service.get_objects_in_polygon(
-                polygon_geojson=optimized_polygon_geojson, # Передаем упрощенный полигон
+                polygon_geojson=optimized_polygon_geojson,
                 buffer_radius_km=buffer_radius_km,
                 object_type=object_type,
                 object_subtype=object_subtype,
                 limit=limit
             )
             
-            # ЕСЛИ ЕСТЬ БУФЕРНАЯ ЗОНА - ОБРЕЗАЕМ ПОЛИГОНЫ
             if buffer_radius_km > 0:
                 try:
-                    # Создаем буферную зону для обрезки (используем оптимизированный полигон для скорости)
                     buffer_geometry = self.geo_service.create_buffer_geometry(
                         optimized_polygon_geojson, 
                         buffer_radius_km
@@ -855,16 +758,14 @@ class SearchService:
                         logger.info(f"✅ Полигоны обрезаны. Осталось объектов: {len(results)}")
                 except Exception as e:
                     logger.error(f"Ошибка обрезки полигонов: {str(e)}")
-                    # Продолжаем с необрезанными полигонами в случае ошибки
             
             if not results:
                 return {
                     "answer": "В указанной области не найдено объектов",
                     "objects": [],
-                    "polygon": polygon_geojson, # Возвращаем оригинальный полигон для отображения на карте
+                    "polygon": polygon_geojson,
                     "biological_objects": ""
                 }
-            
             
             formatted_results = []
             type_counts = {}
@@ -874,10 +775,9 @@ class SearchService:
                 obj_type = obj.get("type", "unknown")
                 type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
                 
-                # ВАЖНО: Сохраняем информацию о географическом объекте
                 formatted_obj = {
-                    "name": obj["name"],  # Название биологического вида
-                    "location_name": obj.get("geo_name") or obj["name"],  # Название геообъекта
+                    "name": obj["name"],
+                    "location_name": obj.get("geo_name") or obj["name"],
                     "distance": f"{obj['distance_km']:.1f} км от центра",
                     "type": obj_type,
                     "geojson": obj["geojson"]
@@ -891,14 +791,12 @@ class SearchService:
                 
                 formatted_results.append(formatted_obj)
             
-            
             total_count = len(results)
             type_summary = ", ".join([f"{count} {type_name}" for type_name, count in type_counts.items()])
             area_desc = "полигона" if buffer_radius_km == 0 else f"полигона + {buffer_radius_km}км буфер"
             
             biological_objects_str = ", ".join(biological_objects) if biological_objects else "биологические объекты не найдены"
             
-            # Обновляем ответ с учетом подтипов
             if object_subtype:
                 answer = f"Найдено {total_count} объектов типа '{object_type}' подтипа '{object_subtype}' в области {area_desc} ({type_summary}). Биологические объекты: {biological_objects_str}"
             else:
@@ -907,7 +805,7 @@ class SearchService:
             return {
                 "answer": answer,
                 "objects": formatted_results,
-                "polygon": polygon_geojson, # Возвращаем оригинальный полигон (красивый) для фронтенда
+                "polygon": polygon_geojson,
                 "biological_objects": biological_objects_str 
             }
             
@@ -928,10 +826,9 @@ class SearchService:
     limit: int = 20,
     object_type: str = None,
     species_name: Optional[Union[str, List[str]]] = None,
-    in_stoplist: int = 1  # Добавить параметр
+    in_stoplist: int = 1
 ) -> Dict[str, Any]:
         try:
-            # Исправленный вызов GeoService
             start = time.perf_counter()
             results = self.geo_service.get_nearby_objects(
                 latitude=latitude,
@@ -940,7 +837,7 @@ class SearchService:
                 limit=limit,
                 object_type=object_type,
                 species_name=species_name,
-                in_stoplist=in_stoplist  # Передать параметр
+                in_stoplist=in_stoplist
             )
             logger.info(f"Nearby objects search took: {time.perf_counter() - start:.2f}s")
             if not results:
@@ -948,26 +845,23 @@ class SearchService:
                     "answer": f"В радиусе {radius_km} км не найдено объектов",
                     "objects": []
                 }
-            # Форматируем результаты
+            
             formatted_results = []
             type_counts = {}
             for obj in results:
-                # Собираем статистику по типам
                 obj_type = obj.get("type", "unknown")
                 type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
-                # Форматируем каждый объект
                 formatted_obj = {
                     "name": obj["name"],
                     "distance": f"{obj['distance_km']:.1f} км",
                     "type": obj_type,
                     "geojson": obj["geojson"]
                 }
-                # Добавляем описание, если есть
                 if obj.get("description"):
                     formatted_obj["description"] = obj["description"][:200] + "..." if len(obj["description"]) > 200 else obj["description"]
                 
                 formatted_results.append(formatted_obj)
-            # Формируем ответное сообщение
+            
             total_count = len(results)
             type_summary = ", ".join([f"{count} {type_name}" for type_name, count in type_counts.items()])
             answer = f"Найдено {total_count} объектов поблизости ({type_summary})"

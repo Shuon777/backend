@@ -16,12 +16,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-#logging.getLogger('core.relational_service').setLevel(logging.INFO)
 load_dotenv()
 class RelationalService:
-    def __init__(self,
-                species_synonyms_path: Optional[str] = None
-    ):
+    def __init__(self):
         self.llm = get_gigachat()
         self.db_config = {
             "dbname": os.getenv("DB_NAME", "eco"),
@@ -30,8 +27,6 @@ class RelationalService:
             "host": os.getenv("DB_HOST", "localhost"),
             "port": os.getenv("DB_PORT", "5432")
         }
-        self.species_synonyms = self._load_species_synonyms(species_synonyms_path)
-# Добавляем в класс RelationalService после метода execute_query
 
     def log_error_to_db(
         self,
@@ -42,28 +37,16 @@ class RelationalService:
     ) -> tuple[bool, int, str]:
         """
         Логирование ошибки в таблицу error_log
-        
-        Args:
-            user_query: Текст запроса пользователя
-            error_message: Описание ошибки (обязательно)
-            context: JSON объект с контекстом ошибки
-            additional_info: JSON объект с дополнительной информацией
-            
-        Returns:
-            Tuple[bool, int, str]: (success, error_id, message)
         """
         try:
-            # Валидация обязательных полей
             if not error_message:
                 return False, 0, "Обязательное поле 'error_message' отсутствует"
             
-            # Подготовка данных
             if context is None:
                 context = {}
             if additional_info is None:
                 additional_info = {}
             
-            # SQL запрос для вставки (соответствует новой структуре таблицы)
             insert_query = """
             INSERT INTO error_log (
                 user_query, 
@@ -75,7 +58,6 @@ class RelationalService:
             RETURNING id
             """
             
-            # Выполняем запрос
             from psycopg2.extras import Json
             conn = psycopg2.connect(**self.db_config)
             cursor = conn.cursor()
@@ -108,14 +90,6 @@ class RelationalService:
 ) -> Dict[str, Any]:
         """
         Поиск изображений по названию вида и признакам
-        
-        Args:
-            species_name: Название биологического вида
-            features: Словарь с признаками для фильтрации
-            synonyms_data: Данные синонимов (опционально)
-            
-        Returns:
-            Результаты поиска изображений
         """
         try:
             if synonyms_data is None:
@@ -138,13 +112,10 @@ class RelationalService:
                     all_names = [species_name]
                     
                 for name in all_names:
-                    # ИСПРАВЛЕНИЕ: Используем более простой подход с word boundaries
-                    # Заменяем пробелы и дефисы на шаблоны, которые могут содержать пробелы/дефисы
                     pattern = r'\y' + name.replace(' ', r'[ -]?').replace('-', r'[ -]?') + r'\y'
-                    species_conditions.append("be.common_name_ru ~* %s")  # ~* для регистронезависимого поиска
+                    species_conditions.append("be.common_name_ru ~* %s")
                     params.append(pattern)
             else:
-                # ИСПРАВЛЕНИЕ: Для случая без синонимов
                 pattern = r'\y' + species_name.replace(' ', r'[ -]?').replace('-', r'[ -]?') + r'\y'
                 species_conditions.append("be.common_name_ru ~* %s")
                 params.append(pattern)
@@ -182,9 +153,7 @@ class RelationalService:
                     feature_conditions.append("ic.feature_data->'flower_and_fruit_info'->>'flowering' ILIKE %s")
                     params.append(f'%{value}%')
                 elif key == 'fruits_present':
-                    # Специальная обработка для "нет"
                     if value.lower() == "нет":
-                        # Ищем записи, где fruits_present отсутствует, пустой, или содержит "нет"
                         feature_conditions.append(
                             "(ic.feature_data->'flower_and_fruit_info'->>'fruits_present' IS NULL OR "
                             "ic.feature_data->'flower_and_fruit_info'->>'fruits_present' = '' OR "
@@ -192,7 +161,6 @@ class RelationalService:
                         )
                         params.append('%нет%')
                     else:
-                        # Обычный поиск по значению
                         feature_conditions.append("ic.feature_data->'flower_and_fruit_info'->>'fruits_present' ILIKE %s")
                         params.append(f'%{value}%')
                 elif key == 'author':
@@ -247,12 +215,6 @@ class RelationalService:
     def search_images_by_features_only(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
         Поиск изображений только по признакам (без привязки к виду)
-        
-        Args:
-            features: Словарь с признаками для фильтрации
-            
-        Returns:
-            Результаты поиска изображений
         """
         try:
             sql_query = """
@@ -340,25 +302,6 @@ class RelationalService:
             }
    
                  
-    def _load_species_synonyms(self, file_path: Optional[str] = None):
-            """Загружает синонимы видов из JSON файла"""
-            if file_path is None:
-                base_dir = Path(__file__).parent.parent
-                file_path = base_dir / "json_files" / "species_synonyms.json"
-            
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except FileNotFoundError:
-                logger.error(f"Файл синонимов не найден: {file_path}")
-                return {}
-            except json.JSONDecodeError as e:
-                logger.error(f"Ошибка парсинга JSON файла синонимов: {e}")
-                return {}
-            except Exception as e:
-                logger.error(f"Ошибка загрузки синонимов: {e}")
-                return {}
-            
     def get_text_descriptions(self, species_name: str) -> List[str]:
         """Получает все текстовые описания по названию вида"""
         query = """
@@ -369,7 +312,7 @@ JOIN entity_relation er ON be.id = er.target_id
     AND er.relation_type = 'описание объекта'
 JOIN text_content tc ON tc.id = er.source_id 
     AND er.source_type = 'text_content'
-WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
+WHERE be.common_name_ru ~* %s;
 """
         try:
             pattern = r'\y' + re.escape(species_name) + r'\y'
@@ -406,20 +349,15 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         WHERE {name_field} ILIKE %(object_name)s
         """
         
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         try:
-            # Определяем таблицу и поле имени в зависимости от типа объекта
             table_map = {
                 "biological_entity": {"table": "biological_entity", "name_field": "be.common_name_ru"},
                 "geographical_entity": {"table": "geographical_entity", "name_field": "be.name_ru"}, 
@@ -477,14 +415,13 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
     object_type: str = "all",
     limit: int = 10,
     in_stoplist: str = "1",
-    object_name: Optional[str] = None  # Добавляем параметр для точного поиска
+    object_name: Optional[str] = None
 ) -> List[Dict]:
         """
         Поиск описаний объектов по фильтрам из JSON body с учетом in_stoplist
         и точным поиском по object_name если передан
         """
         try:
-            # Определяем типы объектов для поиска
             search_types = []
             if object_type == "all":
                 search_types = ["geographical_entity"]
@@ -499,7 +436,7 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                     object_type=entity_type,
                     limit=limit,
                     in_stoplist=in_stoplist,
-                    object_name=object_name  # Передаем object_name для точного поиска
+                    object_name=object_name
                 )
                 if descriptions:
                     all_descriptions.extend(descriptions)
@@ -516,7 +453,7 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
     object_type: str,
     limit: int,
     in_stoplist: str = "1",
-    object_name: Optional[str] = None  # Добавляем параметр для точного поиска
+    object_name: Optional[str] = None
 ) -> List[Dict]:
         """
         Поиск описаний для конкретного типа объекта по фильтрам 
@@ -538,17 +475,13 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         WHERE 1=1
         """
         
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         
         params = {
@@ -558,28 +491,22 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         
         conditions = []
         
-        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Точный поиск по object_name если передан
         if object_name:
             conditions.append("be.name_ru = %(object_name)s")
             params['object_name'] = object_name
             logger.info(f"🔍 Точный поиск по названию: '{object_name}'")
         
-        # Обработка location_info с точным поиском слов
         if 'location_info' in filter_data:
             location_info = filter_data['location_info']
             
-            # Точный поиск по exact_location - слово целиком
             if 'exact_location' in location_info and location_info['exact_location']:
                 exact_location = location_info['exact_location'].strip()
                 if exact_location:
-                    # Используем регулярное выражение для поиска слова целиком
                     conditions.append(
                         "be.feature_data->'location_info'->>'exact_location' ~ %(exact_location_pattern)s"
                     )
-                    # Создаем паттерн для точного поиска слова
                     params['exact_location_pattern'] = r'(^|[\s,."])' + re.escape(exact_location) + r'([\s,."]|$)'
             
-            # Точный поиск по region - слово целиком
             if 'region' in location_info:
                 region = location_info.get('region', '').strip()
                 if region:
@@ -596,19 +523,15 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                     baikal_relation = [item.strip() for item in baikal_relation if item]
                 
                 if baikal_relation:
-                    # Используем оператор ?| для поиска в массиве JSONB
                     conditions.append("be.feature_data->'baikal_relation' ?| %(baikal_relation_array)s")
                     params['baikal_relation_array'] = baikal_relation
                     
-        # Обработка geo_type (оставляем без изменений)
         if 'geo_type' in filter_data:
             geo_type = filter_data['geo_type']
             
-            # Фильтрация по primary_type
             if 'primary_type' in geo_type and geo_type['primary_type']:
                 primary_types = geo_type['primary_type']
                 if isinstance(primary_types, list):
-                    # Для массива используем оператор ?| (любой элемент массива содержится)
                     primary_conditions = []
                     for primary_type in primary_types:
                         param_name = f'primary_type_{len(primary_conditions)}'
@@ -620,33 +543,28 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                     if primary_conditions:
                         conditions.append("(" + " OR ".join(primary_conditions) + ")")
                 else:
-                    # Одиночное строковое значение
                     conditions.append(
                         "be.feature_data->'geo_type'->'primary_type' ? %(primary_type)s"
                     )
                     params['primary_type'] = primary_types
             
-            # Фильтрация по specific_types
             if 'specific_types' in geo_type and geo_type['specific_types']:
                 specific_types = geo_type['specific_types']
                 if isinstance(specific_types, list):
                     specific_conditions = []
                     for i, specific_type in enumerate(specific_types):
                         param_name = f'specific_type_{i}'
-                        # Используем ? оператор для поиска элемента в массиве JSONB
                         specific_conditions.append(
                             f"be.feature_data->'geo_type'->'specific_types' ? %({param_name})s"
                         )
                         params[param_name] = specific_type
                     conditions.append("(" + " OR ".join(specific_conditions) + ")")
                 else:
-                    # Одиночное значение
                     conditions.append(
                         "be.feature_data->'geo_type'->'specific_types' ? %(specific_types)s"
                     )
                     params['specific_types'] = specific_types
         
-        # Определяем таблицу и поле имени в зависимости от типа объекта
         table_map = {
             "biological_entity": {"table": "biological_entity", "name_field": "be.common_name_ru"},
             "geographical_entity": {"table": "geographical_entity", "name_field": "be.name_ru"},
@@ -663,7 +581,6 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         table_info = table_map[object_type]
         formatted_query = query.format(table_name=table_info["table"])
         
-        # Добавляем условия фильтрации в запрос
         if conditions:
             formatted_query += " AND " + " AND ".join(conditions)
         
@@ -672,8 +589,6 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         logger.debug(f"Выполняется поиск по фильтрам для типа: '{object_type}'")
         if object_name:
             logger.debug(f"🔍 ТОЧНЫЙ ПОИСК по названию: '{object_name}'")
-        #logger.debug(f"SQL запрос: {formatted_query}")
-        #logger.debug(f"Параметры: {params}")
         
         try:
             results = self.execute_query(formatted_query, params)
@@ -697,7 +612,6 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                         "object_type": object_type,
                         "feature_data": feature_data
                     }
-                    # Добавляем structured_data в результат, если он есть
                     if structured_data:
                         result_item["structured_data"] = structured_data
                     formatted_results.append(result_item)
@@ -737,17 +651,13 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
             AND er.target_type = 'biological_entity'
         WHERE 1 - (tc.embedding <=> %(embedding)s::vector) > %(similarity_threshold)s
         """
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         query += " ORDER BY similarity DESC LIMIT %(limit)s;"
         
@@ -825,22 +735,17 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         WHERE {name_field} ILIKE %(object_name)s
           AND 1 - (tc.embedding <=> %(embedding)s::vector) > %(similarity_threshold)s
         """
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         query += " ORDER BY similarity DESC LIMIT %(limit)s;"
         
         try:
-            # <-- ВАЖНО: Добавляем лог, чтобы видеть, для какого типа объекта мы работаем
             logger.debug(f"Выполняется векторный поиск для типа: '{object_type}' с именем: '{object_name}' и in_stoplist: '{in_stoplist}'")
             table_map = {
                 "biological_entity": {"table": "biological_entity", "name_field": "be.common_name_ru"},
@@ -858,7 +763,6 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                 
             table_info = table_map[object_type]
             
-            # Используем именованные параметры для надежности, как и в функции без эмбеддингов
             formatted_query = query.format(
                 table_name=table_info["table"], 
                 name_field=table_info["name_field"]
@@ -874,9 +778,6 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                 'limit': limit
             }
             
-            # <-- ВАЖНО: Логируем сам запрос и параметры перед выполнением
-            #logger.debug(f"Сформированный SQL-запрос:\n{formatted_query}")
-            #logger.debug(f"Параметры запроса: {params}")
             results = self.execute_query(formatted_query, params)
             
             if not results:
@@ -924,8 +825,8 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
         tc.content, 
         tc.structured_data, 
         tc.feature_data,
-        be.common_name_ru as object_name,  -- ДОБАВЛЯЕМ имя объекта
-        be.feature_data as species_features  -- ДОБАВЛЯЕМ фичи объекта
+        be.common_name_ru as object_name,
+        be.feature_data as species_features
     FROM biological_entity be
     JOIN entity_relation er ON be.id = er.target_id 
         AND er.target_type = 'biological_entity'
@@ -935,17 +836,13 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
     WHERE be.common_name_ru ILIKE %s
     """
         
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         
         query += ";"
@@ -958,8 +855,8 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                 content = row['content']
                 structured_data = row.get('structured_data')
                 feature_data = row.get('feature_data', {})
-                object_name = row.get('object_name')  # Имя из БД
-                species_features = row.get('species_features', {})  # Фичи вида
+                object_name = row.get('object_name')
+                species_features = row.get('species_features', {})
                 
                 if not content and structured_data:
                     extracted_content = self._extract_content_from_structured_data(structured_data)
@@ -968,18 +865,18 @@ WHERE be.common_name_ru ~* %s;  -- Регулярное выражение
                             "content": extracted_content,
                             "source": "structured_data",
                             "feature_data": feature_data,
-                            "object_name": object_name,  # ДОБАВЛЯЕМ
-                            "species_features": species_features,  # ДОБАВЛЯЕМ
-                            "object_type": "biological_entity"  # ДОБАВЛЯЕМ
+                            "object_name": object_name,
+                            "species_features": species_features,
+                            "object_type": "biological_entity"
                         })
                 elif content:
                     descriptions.append({
                         "content": content,
                         "source": "content", 
                         "feature_data": feature_data,
-                        "object_name": object_name,  # ДОБАВЛЯЕМ
-                        "species_features": species_features,  # ДОБАВЛЯЕМ
-                        "object_type": "biological_entity"  # ДОБАВЛЯЕМ
+                        "object_name": object_name,
+                        "species_features": species_features,
+                        "object_type": "biological_entity"
                     })
                     
             return descriptions
@@ -1006,7 +903,7 @@ JOIN entity_relation er ON be.id = er.target_id
     AND er.relation_type = 'описание объекта'
 JOIN text_content tc ON tc.id = er.source_id 
     AND er.source_type = 'text_content'
-WHERE be.common_name_ru ~* %s  -- Регулярное выражение вместо ILIKE
+WHERE be.common_name_ru ~* %s
 AND 1 - (tc.embedding <=> %s::vector) > %s
 """
         logger.info(f"🔍 ВЫПОЛНЯЕТСЯ ВЕКТОРНЫЙ ПОИСК:")
@@ -1015,17 +912,13 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
         logger.info(f"   - in_stoplist: {in_stoplist}")
         logger.info(f"   - limit: {limit}")
         logger.info(f"   - Длина embedding: {len(query_embedding)}")
-        # Гибкая фильтрация по in_stoplist
         try:
             if in_stoplist == "0":
-                # Только самые безопасные записи (уровень 0 или null)
                 query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer = 0)"
             else:
-                # Для уровней 1, 2, 3... - все записи с уровнем <= запрошенному
                 requested_level = int(in_stoplist)
                 query += f" AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= {requested_level})"
         except ValueError:
-            # Если передано не число, используем уровень по умолчанию (1)
             query += " AND (tc.feature_data->>'in_stoplist' IS NULL OR (tc.feature_data->>'in_stoplist')::integer <= 1)"
         
         query += " ORDER BY similarity DESC LIMIT %s;"
@@ -1033,7 +926,7 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
         try:
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
             
-            pattern = r'\y' + re.escape(species_name) + r'\y'  # Точное совпадение слова
+            pattern = r'\y' + re.escape(species_name) + r'\y'
             results = self.execute_query(
                 query, 
                 (embedding_str, pattern, embedding_str, similarity_threshold, limit)
@@ -1049,14 +942,12 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
                     structured_data = row.get('structured_data')
                     similarity = row.get('similarity')
                     feature_data = row.get('feature_data', {})
-                    object_name = row.get('object_name')  # Имя из БД
-                    species_features = row.get('species_features', {})  # Фичи вида
+                    object_name = row.get('object_name')
+                    species_features = row.get('species_features', {})
                     
-                    # ФИКС: Проверяем similarity на валидность
                     if similarity is not None:
                         try:
                             similarity_float = float(similarity)
-                            # Проверяем, что это число и не NaN
                             if not math.isnan(similarity_float):
                                 similarity_value = similarity_float
                             else:
@@ -1066,13 +957,11 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
                     else:
                         similarity_value = None
                     
-                    # ПРИНУДИТЕЛЬНОЕ ИЗВЛЕЧЕНИЕ КОНТЕНТА
                     final_content = content
                     if not final_content and structured_data:
                         final_content = self._extract_content_from_structured_data(structured_data)
                         logger.info(f"📝 ИЗВЛЕЧЕН КОНТЕНТ ИЗ structured_data: {len(final_content)} символов")
                     
-                    # Если все еще нет контента, создаем заглушку
                     if not final_content:
                         final_content = f"Описание вида {species_name}"
                         logger.warning(f"⚠️  КОНТЕНТ ОТСУТСТВУЕТ, создана заглушка")
@@ -1084,9 +973,8 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
                             "feature_data": feature_data,
                             "object_name": object_name,  
                             "species_features": species_features, 
-                            "object_type": "biological_entity"  # ДОБАВЛЯЕМ тип
+                            "object_type": "biological_entity"
                         }
-                        # Добавляем similarity только если оно валидно
                         if similarity_value is not None:
                             item["similarity"] = similarity_value
                             
@@ -1118,7 +1006,6 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
         Поиск объектов по имени с возможной фильтрацией по типу и подтипу
         Поддерживает различные типы объектов: geographical_entity, biological_entity и др.
         """
-        # Определяем таблицу и поля в зависимости от типа объекта
         table_map = {
             "geographical_entity": {
                 "table": "geographical_entity", 
@@ -1192,7 +1079,6 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
             }
         }
         
-        # Если тип не указан, ищем во всех типах объектов
         if not object_type or object_type == "all":
             all_results = []
             for obj_type in table_map.keys():
@@ -1205,11 +1091,9 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
                     logger.error(f"Ошибка поиска объектов типа '{obj_type}': {str(e)}")
                     continue
             
-            # Сортируем по имени и ограничиваем общее количество
             all_results.sort(key=lambda x: x.get('name', ''))
             return all_results[:limit]
         
-        # Если тип указан, но не найден в table_map, используем geographical_entity по умолчанию
         if object_type not in table_map:
             logger.warning(f"Неизвестный тип объекта '{object_type}', используем geographical_entity")
             object_type = "geographical_entity"
@@ -1257,7 +1141,6 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
         
         conditions = []
         
-        # Фильтрация по подтипу
         if object_subtype:
             conditions.append(f"{table_info['table'][:2]}.feature_data->'geo_type'->'specific_types' ? %(object_subtype)s")
             params['object_subtype'] = object_subtype
@@ -1284,7 +1167,6 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
                     "features": features
                 }
                 
-                # Добавляем информацию о типах, если доступна
                 if 'geo_type' in features:
                     geo_type = features['geo_type']
                     result_item["primary_types"] = geo_type.get('primary_type', [])
@@ -1308,15 +1190,14 @@ AND 1 - (tc.embedding <=> %s::vector) > %s
     object_subtype: Optional[str] = None,
     object_name: Optional[str] = None,
     limit: int = 70,
-    search_around: bool = False,  # Новый параметр
-    buffer_radius_km: float = 10.0  # Новый параметр
+    search_around: bool = False,
+    buffer_radius_km: float = 10.0
 ) -> List[Dict]:
         """
         Поиск географических объектов в заданной области с фильтрацией
         """
         area_geojson_str = json.dumps(area_geometry)
         
-        # Базовый запрос
         query = """
         WITH search_area AS (
     SELECT 
@@ -1355,13 +1236,11 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         
         conditions = []
         
-        # Фильтрация по имени объекта
         if object_name:
             conditions.append("ge.name_ru ILIKE %(object_name)s")
             params['object_name'] = f'%{object_name}%'
         
-        # Фильтрация по типу объекта
-        if object_type and object_type != "all":  # Добавьте проверку на "all"
+        if object_type and object_type != "all":
             conditions.append("""
                 (
                     ge.feature_data->'geo_type'->'primary_type' ? %(object_type)s
@@ -1371,7 +1250,6 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
             """)
             params['object_type'] = object_type
         
-        # Фильтрация по подтипу
         if object_subtype:
             conditions.append("ge.feature_data->'geo_type'->'specific_types' ? %(object_subtype)s")
             params['object_subtype'] = object_subtype
@@ -1399,7 +1277,7 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
                     "features": features,
                     "primary_types": geo_type.get('primary_type', []),
                     "specific_types": geo_type.get('specific_types', []),
-                    "location_type": row.get('location_type', 'inside')  # Новое поле
+                    "location_type": row.get('location_type', 'inside')
                 })
             
             return formatted_results
@@ -1422,7 +1300,7 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
             mc.feature_data,
             'map_content' as source
         FROM map_content mc
-        WHERE LOWER(TRIM(mc.title)) = LOWER(%s)  -- ТОЧНОЕ СОВПАДЕНИЕ
+        WHERE LOWER(TRIM(mc.title)) = LOWER(%s)
         AND (
             mc.feature_data->>'type' IN ('geographical_entity', 'region', 'city', 'area', 'polygon')
             OR ST_GeometryType(mc.geometry) != 'ST_Point'
@@ -1453,7 +1331,7 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
             SELECT 
                 ge.id,
                 ge.name_ru as title,
-                ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,  -- Преобразуем WKB в GeoJSON
+                ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,
                 mc.feature_data,
                 'geographical_entity' as source
             FROM geographical_entity ge
@@ -1503,7 +1381,7 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         SELECT 
             mc.id,
             mc.title,
-            ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,  -- Преобразуем WKB в GeoJSON
+            ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,
             mc.feature_data,
             'map_content' as source
         FROM map_content mc
@@ -1542,12 +1420,11 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
                         }
                     }
         
-            # Если не нашли в map_content, пробуем через географические сущности
             geo_query = """
             SELECT 
                 ge.id,
                 ge.name_ru as title,
-                ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,  -- Преобразуем WKB в GeoJSON
+                ST_AsGeoJSON(mc.geometry)::json AS geometry_geojson,
                 mc.feature_data,
                 'geographical_entity' as source
             FROM geographical_entity ge
@@ -1600,12 +1477,9 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         
         content_sections = []
         
-        # Проверяем тип структуры данных
         if 'geographical_info' in structured_data:
-            # Обработка географических объектов
             geo_info = structured_data.get('geographical_info', {})
             
-            # Русские названия полей для географических объектов
             geo_field_titles = {
                 'name': 'Название',
                 'coordinates': 'Координаты',
@@ -1643,7 +1517,6 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
                     "\n".join(f"• {line}" for line in geo_content)
                 )
             
-            # Также проверяем metadata
             metadata = structured_data.get('metadata', {})
             if isinstance(metadata, dict):
                 meta_info = metadata.get('meta_info', {})
@@ -1662,7 +1535,6 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
                             "\n".join(f"• {line}" for line in meta_content)
                         )
             
-            # Если description пустой, формируем базовое описание из других полей
             description = geo_info.get('description', '').strip()
             if not description:
                 name = geo_info.get('name', 'Объект')
@@ -1672,7 +1544,6 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
                 else:
                     description = name
             
-            # Если после обработки все еще нет контента, возвращаем базовое описание
             if not content_sections:
                 return description
             
@@ -1680,7 +1551,6 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
             return result if result.strip() else description
         
         else:
-            # Оригинальная логика для флоры и фауны
             section_titles = {
                 'taxonomy': 'Таксономия',
                 'morphology': 'Морфология',
@@ -1757,16 +1627,12 @@ WHERE ST_Intersects(mc.geometry, sa.geom)
         conn = psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
         try:
             with conn.cursor() as cursor:
-                #logger.debug(f"Executing SQL: {sql_query}")
-                #logger.debug(f"With params: {params}")
-                
                 if params:
                     cursor.execute(sql_query, params)
                 else:
                     cursor.execute(sql_query)
                     
                 results = cursor.fetchall()
-                #logger.debug(f"Raw results from DB: {results}")
                 return results
         except Exception as e:
             logger.error(f"Database error: {str(e)}", exc_info=True)

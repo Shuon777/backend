@@ -64,14 +64,10 @@ init_redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
 current_dir = Path(__file__).parent
 embedding_model_path = str(current_dir / "embedding_models" / "BERTA")
 
-species_synonyms_path = os.getenv("SPECIES_SYNONYMS_PATH", 
-                                 str(Path(__file__).parent / "json_files" / "species_synonyms.json"))
-
 search_service = SearchService(
-    embedding_model_path=embedding_model_path,
-    species_synonyms_path=species_synonyms_path
+    embedding_model_path=embedding_model_path
 )
-relational_service = RelationalService(species_synonyms_path=species_synonyms_path)
+relational_service = RelationalService()
 
 user_locations = {}
 
