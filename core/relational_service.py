@@ -150,7 +150,7 @@ class RelationalService:
                 params.append(pattern)
             
             sql_query = """
-            SELECT 
+            SELECT DISTINCT ON (ei.file_path)
                 ei.file_path AS image_path,
                 ic.title AS title,
                 ic.description AS description,
@@ -201,15 +201,14 @@ class RelationalService:
             
             if feature_conditions:
                 sql_query += " AND " + " AND ".join(feature_conditions)
-            
-            sql_query += " ORDER BY ic.id LIMIT 50;"
+            sql_query += " ORDER BY ei.file_path, ic.title, ic.id LIMIT 50;"
             
             logger.info(f"Searching for species: {species_name}")
             logger.info(f"Using synonyms: {synonyms_data}")
             logger.info(f"Generated patterns: {params[:len(all_names) if 'all_names' in locals() else 1]}")
             
             results = self.execute_query(sql_query, tuple(params))
-            
+            logger.info(f"🔍 RAW SQL RESULTS COUNT: {len(results)}")
             if not results:
                 return {
                     "status": "not_found",

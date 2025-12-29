@@ -496,25 +496,34 @@ class SearchService:
     
     
     def search_images_by_features(
-    self,
-    species_name: str,
-    features: Dict[str, Any]
-) -> Dict[str, Any]:
+        self,
+        species_name: str,
+        features: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Поиск изображений по названию вида и признакам
-        
-        Args:
-            species_name: Название биологического вида
-            features: Словарь с признаками для фильтрации
-            
-        Returns:
-            Результаты поиска изображений
         """
         try:
-            synonyms_data = self.get_synonyms_for_name(species_name)
+            # ИСПРАВЛЕНИЕ: Используем resolve_object_synonym для правильного разрешения синонимов
+            resolved_synonym = self.resolve_object_synonym(species_name, "biological_entity")
+            
+            logger.info(f"🔍 Разрешение синонима для '{species_name}': {resolved_synonym}")
+            
+            # Получаем основное название из разрешенного синонима
+            main_name = resolved_synonym.get("main_form", species_name)
+            object_type = resolved_synonym.get("object_type", "biological_entity")
+            
+            # ИСПРАВЛЕНИЕ: Получаем синонимы для основного названия
+            synonyms_data = self.get_synonyms_for_name(main_name)
+            
+            # Если не нашли синонимы, используем исходное название
+            if "error" in synonyms_data:
+                synonyms_data = {main_name: []}
+            
+            logger.info(f"✅ Основное название: '{main_name}', синонимы: {synonyms_data}")
             
             return self.relational_service.search_images_by_features(
-                species_name=species_name,
+                species_name=main_name,  # Используем основное название
                 features=features,
                 synonyms_data=synonyms_data
             )
