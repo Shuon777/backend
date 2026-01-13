@@ -33,7 +33,8 @@ import os
 from pathlib import Path
 from werkzeug.utils import secure_filename
 import tempfile
-
+import secrets
+from functools import wraps
 # Добавим импорт нашего сервиса
 from core.resource_update_service import ResourceUpdateService
 BASE_DIR = Path(__file__).parent
@@ -78,6 +79,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 matplotlib_logger = logging.getLogger('matplotlib')
 matplotlib_logger.setLevel(logging.WARNING)
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "default_admin_password")  
+def require_admin_password(f):
+    """Декоратор для проверки пароля админа"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        provided_password = request.args.get('admin_password') or request.headers.get('X-Admin-Password')
+        
+        if not provided_password:
+            return jsonify({
+                "status": "error",
+                "message": "Требуется пароль администратора"
+            }), 401
+        
+        if not secrets.compare_digest(provided_password, ADMIN_PASSWORD):
+            return jsonify({
+                "status": "error", 
+                "message": "Неверный пароль администратора"
+            }), 403
+            
+        return f(*args, **kwargs)
+    return decorated_function
 
 @app.route("/log_error", methods=["POST"])
 def log_error():
@@ -154,7 +177,9 @@ def log_error():
             "used_objects": [],
             "not_used_objects": []
         }), 500
+        
 @app.route("/reload_database", methods=["POST"])
+@require_admin_password
 def reload_database():
     """
     Эндпоинт для перезагрузки базы данных без добавления новых ресурсов
@@ -240,6 +265,7 @@ def reload_database():
         }), 500
         
 @app.route("/upload_resources", methods=["POST"])
+@require_admin_password  
 def upload_resources():
     """
     Эндпоинт для загрузки архивов с аннотациями и изображениями
@@ -331,26 +357,50 @@ def upload_resources():
             else:
                 results["update_type"] = "без обновления БД"
             
-            # Формируем ответ
-            response_data = {
-                "status": "success",
-                "message": "Ресурсы успешно обработаны",
-                "results": results,
-                "used_objects": [
-                    {
-                        "name": "resources_dist.json",
-                        "type": "configuration",
-                        "operation": "update"
-                    }
-                ],
-                "not_used_objects": []
-            }
+            if reload_database and results.get("database_status") == "started":
+                response_data = {
+                    "status": "success",
+                    "message": "Ресурсы успешно обработаны. Перезагрузка базы данных запущена в фоновом режиме.",
+                    "details": results.get("database_message", "Можете следить за прогрессом в логах"),
+                    "results": {
+                        "json_processed": results.get("json_processed", 0),
+                        "images_processed": results.get("images_processed", 0),
+                        "new_resources": results.get("new_resources", 0),
+                        "updated_resources": results.get("updated_resources", 0),
+                        "database_status": "started",
+                        "update_type": results.get("update_type", "неизвестно"),
+                        "use_stubs": use_stubs
+                    },
+                    "used_objects": [
+                        {
+                            "name": "resources_dist.json",
+                            "type": "configuration",
+                            "operation": "update"
+                        }
+                    ],
+                    "not_used_objects": []
+                }
+            else:
+                # Существующий ответ для случая без перезагрузки БД
+                response_data = {
+                    "status": "success",
+                    "message": "Ресурсы успешно обработаны",
+                    "results": results,
+                    "used_objects": [
+                        {
+                            "name": "resources_dist.json",
+                            "type": "configuration",
+                            "operation": "update"
+                        }
+                    ],
+                    "not_used_objects": []
+                }
             
             if results.get("errors"):
                 response_data["status"] = "partial_success"
                 response_data["message"] = f"Обработка завершена с ошибками"
             
-            logger.info(f"✅ Обработка завершена: {results}")
+            logger.info(f"✅ Обработка завершена, отправляем немедленный ответ")
             return jsonify(response_data)
             
         except Exception as e:
@@ -375,6 +425,386 @@ def upload_resources():
                 
     except Exception as e:
         logger.error(f"❌ Ошибка в /upload_resources: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": f"Внутренняя ошибка сервера: {str(e)}",
+            "used_objects": [],
+            "not_used_objects": []
+        }), 500
+
+# ============================================================================
+# НОВЫЙ ЭНДПОИНТ: Загрузка одного изображения с аннотацией
+# ============================================================================
+@app.route("/upload_single_resource", methods=["POST"])
+@require_admin_password
+def upload_single_resource():
+    """
+    Эндпоинт для загрузки одного изображения с JSON аннотацией
+    
+    Принимает:
+    - image_file: файл изображения (jpg, jpeg, png, gif, bmp)
+    - json_data: JSON с аннотацией (строка или файл)
+    - reload_database: флаг перезагрузки реляционной базы (true/false)
+    - incremental_update: флаг инкрементального обновления (true/false)
+    - use_stubs: флаг использования заглушек для векторов (true/false)
+    - admin_password: пароль администратора (query parameter или заголовок X-Admin-Password)
+    
+    Формат JSON аннотации должен соответствовать структуре resources_dist.json:
+    {
+        "featurePhoto2": {
+            "name_photo": "путь/к/изображению.jpg",
+            "author_photo": "Автор",
+            "parent": "Название вида",
+            "location": {...},
+            "classification_info": {...},
+            "date_shooting_time": "...",
+            ...
+        }
+    }
+    """
+    try:
+        logger.info(f"📤 /upload_single_resource - получен запрос")
+        
+        # Проверяем наличие файла изображения
+        if 'image_file' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "Необходимо загрузить файл изображения (image_file)",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 400
+        
+        image_file = request.files['image_file']
+        
+        # Проверяем, что файл выбран
+        if image_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "Файл изображения не выбран",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 400
+        
+        # Проверяем расширение файла
+        allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'}
+        file_ext = image_file.filename.rsplit('.', 1)[1].lower() if '.' in image_file.filename else ''
+        
+        if file_ext not in allowed_extensions:
+            return jsonify({
+                "status": "error",
+                "message": f"Неподдерживаемый формат файла. Допустимы: {', '.join(allowed_extensions)}",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 400
+        
+        # Получаем JSON аннотацию
+        json_data = None
+        if 'json_data' in request.files:
+            # JSON передан как файл
+            json_file = request.files['json_data']
+            try:
+                json_data = json.load(json_file)
+            except json.JSONDecodeError as e:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Ошибка парсинга JSON файла: {str(e)}",
+                    "used_objects": [],
+                    "not_used_objects": []
+                }), 400
+        elif 'json_data' in request.form:
+            # JSON передан как строка
+            try:
+                json_data = json.loads(request.form['json_data'])
+            except json.JSONDecodeError as e:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Ошибка парсинга JSON строки: {str(e)}",
+                    "used_objects": [],
+                    "not_used_objects": []
+                }), 400
+        
+        if not json_data:
+            return jsonify({
+                "status": "error",
+                "message": "Необходимо предоставить JSON аннотацию (json_data)",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 400
+        
+        # Получаем параметры
+        reload_database = request.form.get('reload_database', 'false').lower() == 'true'
+        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'
+        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        
+        # Читаем размер файла для логирования
+        image_file.seek(0, 2)  # Переходим в конец файла
+        file_size = image_file.tell()
+        image_file.seek(0)  # Возвращаемся в начало
+        
+        logger.info(f"Параметры запроса:")
+        logger.info(f"  - Имя файла: {image_file.filename}")
+        logger.info(f"  - Размер файла: {file_size} байт")
+        logger.info(f"  - Расширение файла: {file_ext}")
+        logger.info(f"  - reload_database: {reload_database}")
+        logger.info(f"  - incremental_update: {incremental_update}")
+        logger.info(f"  - use_stubs: {use_stubs}")
+        
+        # Создаем временную директорию
+        temp_dir = tempfile.mkdtemp()
+        logger.info(f"Создана временная директория: {temp_dir}")
+        
+        try:
+            # 1. Сохраняем изображение во временную директорию
+            image_filename = secure_filename(image_file.filename)
+            image_path = os.path.join(temp_dir, image_filename)
+            image_file.save(image_path)
+            
+            logger.info(f"Изображение сохранено во временную директорию: {image_path}")
+            logger.info(f"Файл существует: {os.path.exists(image_path)}")
+            logger.info(f"Размер файла: {os.path.getsize(image_path)} байт")
+            
+            # 2. Создаем временный JSON файл с аннотацией
+            json_filename = "annotation.json"
+            json_path = os.path.join(temp_dir, json_filename)
+            
+            # Создаем структуру, аналогичную ресурсам из архивов
+            annotation_data = {
+                "featurePhoto2": json_data.get("featurePhoto2", json_data)  # Поддерживаем оба формата
+            }
+            
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(annotation_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"JSON аннотация сохранена: {json_path}")
+            logger.info(f"Структура аннотации: {list(annotation_data.keys())}")
+            
+            # 3. Проверяем существование ресурсного файла
+            if not os.path.exists(RESOURCES_DIST_PATH):
+                logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
+                # Создаем файл если не существует
+                try:
+                    os.makedirs(os.path.dirname(RESOURCES_DIST_PATH), exist_ok=True)
+                    with open(RESOURCES_DIST_PATH, 'w', encoding='utf-8') as f:
+                        json.dump({"resources": []}, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Создан новый файл resources_dist.json")
+                except Exception as e:
+                    logger.error(f"Не удалось создать resources_dist.json: {str(e)}")
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Не удалось создать файл ресурсов: {str(e)}",
+                        "used_objects": [],
+                        "not_used_objects": []
+                    }), 500
+            
+            # 4. Создаем сервис для обработки
+            service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
+            
+            # 5. Обрабатываем как одиночный JSON файл
+            logger.info(f"Начинаем обработку JSON файла: {json_path}")
+            new_resources_list, new_count, updated_count = service.process_json_file(json_path)
+            
+            logger.info(f"Результат обработки JSON:")
+            logger.info(f"  - Новые ресурсы: {new_count}")
+            logger.info(f"  - Обновленные ресурсы: {updated_count}")
+            logger.info(f"  - Всего в списке: {len(new_resources_list)}")
+            
+            if not new_resources_list:
+                return jsonify({
+                    "status": "error",
+                    "message": "Не удалось обработать JSON аннотацию (список ресурсов пуст)",
+                    "used_objects": [],
+                    "not_used_objects": []
+                }), 500
+            
+            # 6. Копируем изображение в папку images с созданием поддиректорий
+            saved_image_path = None
+            saved_relative_path = None
+            
+            try:
+                # Определяем путь для изображения на основе JSON данных
+                feature_data = annotation_data.get("featurePhoto2", {})
+                name_photo = feature_data.get('name_photo', image_filename)
+                
+                logger.info(f"Путь к изображению из аннотации: '{name_photo}'")
+                
+                # Извлекаем относительный путь
+                relative_path = ""
+                
+                # Убираем различные префиксы если они есть
+                prefixes_to_remove = ['data/images/', 'images/', 'static/images/', 'media/']
+                for prefix in prefixes_to_remove:
+                    if name_photo.startswith(prefix):
+                        relative_path = name_photo[len(prefix):]
+                        logger.info(f"Убран префикс '{prefix}': {relative_path}")
+                        break
+                
+                # Если не нашли префикс, используем как есть
+                if not relative_path:
+                    relative_path = name_photo
+                
+                # Заменяем пробелы на подчеркивания во всем пути
+                relative_path = relative_path.replace(' ', '_')
+                logger.info(f"Путь после замены пробелов: '{relative_path}'")
+                
+                # Получаем имя файла и путь к директории
+                filename = os.path.basename(relative_path)
+                directory_path = os.path.dirname(relative_path)
+                
+                logger.info(f"Имя файла: '{filename}'")
+                logger.info(f"Путь к директории: '{directory_path}'")
+                
+                # Создаем полный путь к целевой директории
+                target_dir = os.path.join(IMAGES_DIR, directory_path)
+                logger.info(f"Полный путь к целевой директории: {target_dir}")
+                
+                # Создаем все необходимые поддиректории (если их нет)
+                os.makedirs(target_dir, exist_ok=True)
+                logger.info(f"✅ Создана/проверена директория: {target_dir}")
+                
+                # Проверяем, что директория создана
+                if not os.path.exists(target_dir):
+                    logger.error(f"❌ Директория не была создана: {target_dir}")
+                    raise FileNotFoundError(f"Не удалось создать директорию: {target_dir}")
+                
+                # Полный путь к целевому файлу
+                target_path = os.path.join(target_dir, filename)
+                logger.info(f"Полный путь к целевому файлу: {target_path}")
+                
+                # Копируем изображение
+                shutil.copy2(image_path, target_path)
+                logger.info(f"✅ Изображение успешно скопировано")
+                
+                # Для отладки проверим существование файла
+                if os.path.exists(target_path):
+                    file_size_kb = os.path.getsize(target_path) / 1024
+                    logger.info(f"✅ Файл подтвержден: {target_path}")
+                    logger.info(f"✅ Размер файла: {file_size_kb:.2f} KB")
+                else:
+                    logger.error(f"❌ Файл не найден после копирования: {target_path}")
+                    raise FileNotFoundError(f"Файл не был скопирован: {target_path}")
+                
+                # Сохраняем информацию о пути для ответа
+                saved_image_path = target_path
+                saved_relative_path = os.path.join(directory_path, filename) if directory_path else filename
+                logger.info(f"✅ Сохраненный относительный путь: {saved_relative_path}")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка копирования изображения: {str(e)}", exc_info=True)
+                return jsonify({
+                    "status": "partial_success",
+                    "message": f"Аннотация обработана, но не удалось сохранить изображение: {str(e)}",
+                    "results": {
+                        "json_processed": 1,
+                        "images_processed": 0,
+                        "new_resources": new_count,
+                        "updated_resources": updated_count,
+                        "database_reloaded": False
+                    },
+                    "used_objects": [{"name": image_filename, "type": "image", "operation": "upload"}],
+                    "not_used_objects": []
+                }), 200
+            
+            # 7. Перезагружаем базу данных если запрошено
+            database_reloaded = False
+            if reload_database:
+                logger.info(f"🚀 Запрошена перезагрузка БД")
+                
+                # Создаем временный файл только с новыми ресурсами
+                temp_json_file = os.path.join(temp_dir, "new_resources.json")
+                with open(temp_json_file, 'w', encoding='utf-8') as f:
+                    json.dump({"resources": new_resources_list}, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"📄 Создан временный файл с {len(new_resources_list)} ресурсами: {temp_json_file}")
+                
+                database_reloaded = service.reload_relational_database(
+                    reload_database=reload_database,
+                    use_stubs=use_stubs,
+                    incremental=incremental_update,
+                    new_resources_file=temp_json_file
+                )
+                
+                logger.info(f"Результат перезагрузки БД: {database_reloaded}")
+            
+            # 8. Формируем ответ
+            results = {
+                "json_processed": 1,
+                "images_processed": 1,
+                "new_resources": new_count,
+                "updated_resources": updated_count,
+                "database_reloaded": database_reloaded,
+                "update_type": "полное" if not incremental_update else "инкрементальное" if database_reloaded else "без обновления БД",
+                "image_saved_path": saved_relative_path,  # Добавляем путь к сохраненному изображению
+                "image_full_path": saved_image_path if saved_image_path else None,
+                "image_url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
+            }
+            
+            response_data = {
+                "status": "success",
+                "message": f"Ресурс успешно обработан и добавлен. Изображение сохранено в: {saved_relative_path}",
+                "results": results,
+                "used_objects": [
+                    {
+                        "name": image_filename,
+                        "type": "image",
+                        "operation": "upload",
+                        "saved_path": saved_relative_path,
+                        "url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
+                    },
+                    {
+                        "name": "resources_dist.json",
+                        "type": "configuration",
+                        "operation": "update"
+                    }
+                ],
+                "not_used_objects": []
+            }
+            
+            # Информация о новом ресурсе
+            if new_resources_list:
+                resource_info = new_resources_list[0].get('identificator', {})
+                resource_id = resource_info.get('id', 'unknown')
+                resource_name = resource_info.get('name', {})
+                common_name = resource_name.get('common', 'unknown') if isinstance(resource_name, dict) else 'unknown'
+                
+                response_data["resource_info"] = {
+                    "id": resource_id,
+                    "name": common_name,
+                    "image_path": saved_relative_path,
+                    "image_url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
+                }
+            
+            logger.info(f"✅ Обработка завершена успешно")
+            logger.info(f"  - Сохраненное изображение: {saved_relative_path}")
+            logger.info(f"  - Новых ресурсов: {new_count}")
+            logger.info(f"  - Обновленных ресурсов: {updated_count}")
+            logger.info(f"  - БД перезагружена: {database_reloaded}")
+            
+            return jsonify(response_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки ресурса: {str(e)}", exc_info=True)
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                "status": "error",
+                "message": f"Ошибка обработки: {str(e)}",
+                "used_objects": [],
+                "not_used_objects": []
+            }), 500
+            
+        finally:
+            # Удаляем временную директорию
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info(f"Удалена временная папка: {temp_dir}")
+                except Exception as e:
+                    logger.error(f"Ошибка удаления временной папки: {str(e)}")
+                    
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /upload_single_resource: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({

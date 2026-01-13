@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+import time
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import Json
@@ -65,7 +66,18 @@ class NewResourceImporter:
         else:
             self.embedding_model = None
             print("🚫 Модель эмбеддингов не загружена (режим заглушек)")
-
+            
+    def log_progress(self, current, total, resource_type="ресурсов"):
+        """Логирование прогресса обработки с принудительным сбросом буфера"""
+        progress_percent = (current / total) * 100 if total > 0 else 0
+        progress_bar = "█" * int(progress_percent / 5) + "░" * (20 - int(progress_percent / 5))
+        
+        # Используем sys.stdout.write с flush=True для немедленного вывода
+        import sys
+        message = f"[{progress_bar}] {current}/{total} {resource_type} ({progress_percent:.1f}%)\n"
+        sys.stdout.write(message)
+        sys.stdout.flush()
+    
     def safe_convert_in_stoplist(self, value):
         """Безопасно преобразует in_stoplist в число"""
         if value is None:
@@ -2060,6 +2072,16 @@ class NewResourceImporter:
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        resources = data['resources']
+        total_resources = len(resources)
+        
+        # Используем sys.stdout для немедленного вывода
+        import sys
+        sys.stdout.write(f"📊 Начинаем импорт {total_resources} ресурсов\n")
+        sys.stdout.write(f"🔧 Режим: {'инкрементальный' if incremental_mode else 'полный'}\n")
+        sys.stdout.write(f"🔧 Заглушки эмбеддингов: {'включены' if self.use_embedding_stubs else 'выключены'}\n")
+        sys.stdout.flush()
+        
         success_count = 0
         error_count = 0
         skipped_count = 0
@@ -2067,21 +2089,39 @@ class NewResourceImporter:
         # Если инкрементальный режим, получаем хэши существующих ресурсов
         existing_hashes = set()
         if self.incremental_mode:
+            sys.stdout.write("🔍 Проверка существующих ресурсов...\n")
+            sys.stdout.flush()
             existing_hashes = self.get_existing_resource_hashes()
+            sys.stdout.write(f"📊 Найдено {len(existing_hashes)} существующих записей\n")
+            sys.stdout.flush()
         
-        for i, resource in enumerate(data['resources'], 1):
+        start_time = time.time()
+        
+        for i, resource in enumerate(resources, 1):
             try:
-                print(f"\nProcessing resource {i}/{len(data['resources'])}: {resource.get('type')}")
+                # Логируем прогресс каждые 5 ресурсов для более частого вывода
+                if i <= 5 or i % 5 == 0 or i == total_resources:
+                    elapsed_time = time.time() - start_time
+                    estimated_total = (elapsed_time / i) * total_resources if i > 0 else 0
+                    remaining_time = estimated_total - elapsed_time
+                    
+                    sys.stdout.write(f"\n📊 Прогресс: {i}/{total_resources}\n")
+                    sys.stdout.write(f"⏱️  Прошло: {elapsed_time:.1f}с, Осталось: ~{remaining_time:.1f}с\n")
+                    self.log_progress(i, total_resources)
+                
+                rtype = resource['type']
+                sys.stdout.write(f"\n📋 Обработка ресурса {i}/{total_resources}: {rtype}\n")
+                sys.stdout.flush()
                 
                 # Проверяем дубликаты в инкрементальном режиме
                 if self.incremental_mode:
                     resource_hash = self.calculate_resource_hash(resource)
                     if resource_hash in existing_hashes:
-                        print(f"Resource already exists, skipping...")
+                        sys.stdout.write(f"⏭️  Ресурс уже существует, пропускаем...\n")
+                        sys.stdout.flush()
                         skipped_count += 1
                         continue
                 
-                rtype = resource['type']
                 if rtype == 'Изображение':
                     result = self.process_image(resource)
                 elif rtype == 'Текст':
@@ -2091,18 +2131,24 @@ class NewResourceImporter:
                 elif rtype == 'Географический объект':
                     result = self.process_geographical_object(resource)
                 else:
-                    print(f"Unknown resource type: {rtype}")
+                    sys.stdout.write(f"⚠️  Неизвестный тип ресурса: {rtype}\n")
+                    sys.stdout.flush()
                     result = None
                 
                 if result:
                     self.conn.commit()
                     success_count += 1
+                    sys.stdout.write(f"✅ Успешно обработан (ID: {result})\n")
+                    sys.stdout.flush()
                 else:
                     self.conn.rollback()
                     error_count += 1
+                    sys.stdout.write(f"❌ Ошибка обработки ресурса\n")
+                    sys.stdout.flush()
                 
             except Exception as e:
-                print(f"Error processing resource {i}: {e}")
+                sys.stdout.write(f"❌ Ошибка обработки ресурса {i}: {e}\n")
+                sys.stdout.flush()
                 import traceback
                 traceback.print_exc()
                 self.conn.rollback()
@@ -2112,9 +2158,21 @@ class NewResourceImporter:
                 self.author_cache = {}
                 self.bio_entity_cache = {}
 
-        mode_info = " (режим заглушек эмбеддингов)" if self.use_embedding_stubs else ""
-        inc_info = " (инкрементальный режим)" if self.incremental_mode else ""
-        print(f"\nImport completed{mode_info}{inc_info}. Success: {success_count}, Skipped: {skipped_count}, Errors: {error_count}")
+        total_time = time.time() - start_time
+        
+        sys.stdout.write(f"\n" + "="*60 + "\n")
+        sys.stdout.write(f"🎉 ИМПОРТ ЗАВЕРШЕН\n")
+        sys.stdout.write(f"="*60 + "\n")
+        sys.stdout.write(f"✅ Успешно: {success_count}\n")
+        sys.stdout.write(f"⏭️  Пропущено (дубликаты): {skipped_count}\n")
+        sys.stdout.write(f"❌ Ошибок: {error_count}\n")
+        sys.stdout.write(f"⏱️  Общее время: {total_time:.1f} секунд\n")
+        sys.stdout.write(f"📊 Среднее время на ресурс: {total_time/total_resources if total_resources > 0 else 0:.2f} секунд\n")
+        sys.stdout.write(f"🔧 Режим: {'инкрементальный' if incremental_mode else 'полный'}\n")
+        sys.stdout.write(f"🔧 Заглушки эмбеддингов: {'включены' if self.use_embedding_stubs else 'выключены'}\n")
+        sys.stdout.write(f"="*60 + "\n")
+        sys.stdout.flush()
+        
         return success_count, skipped_count, error_count
     
     def calculate_resource_hash(self, resource):

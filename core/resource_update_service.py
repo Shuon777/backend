@@ -363,11 +363,50 @@ class ResourceUpdateService:
             print(f"Ошибка копирования изображений: {e}")
             import traceback
             traceback.print_exc()
+            
+    def reload_relational_database_async(self, reload_database: bool = False, 
+                                    use_stubs: bool = True,
+                                    incremental: bool = True,
+                                    new_resources_file: Optional[str] = None) -> Dict:
+        """Асинхронная перезагрузка или инкрементальное обновление реляционной базы данных"""
+        import threading
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        def run_async():
+            """Функция для запуска в отдельном потоке"""
+            try:
+                logger.info("🔄 Запуск асинхронной перезагрузки базы данных...")
+                self.reload_relational_database(
+                    reload_database=reload_database,
+                    use_stubs=use_stubs,
+                    incremental=incremental,
+                    new_resources_file=new_resources_file
+                )
+                logger.info("✅ Асинхронная перезагрузка базы данных завершена")
+            except Exception as e:
+                logger.error(f"❌ Ошибка в асинхронной перезагрузке БД: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # Запускаем в отдельном потоке
+        thread = threading.Thread(target=run_async, daemon=True)
+        thread.start()
+        
+        # Немедленно возвращаем информацию о запуске
+        return {
+            "status": "started",
+            "message": "Запущена перезагрузка базы данных в фоновом режиме",
+            "update_type": "полное" if not incremental else "инкрементальное",
+            "use_stubs": use_stubs,
+            "details": "Вы можете следить за прогрессом в логах приложения"
+        }
     
     def reload_relational_database(self, reload_database: bool = False, 
-                          use_stubs: bool = True,
-                          incremental: bool = True,
-                          new_resources_file: Optional[str] = None) -> bool:
+                      use_stubs: bool = True,
+                      incremental: bool = True,
+                      new_resources_file: Optional[str] = None) -> bool:
         """Перезагружает или инкрементально обновляет реляционную базу данных"""
         try:
             import sys
@@ -402,7 +441,7 @@ class ResourceUpdateService:
                         capture_output=True,
                         text=True,
                         cwd=scripts_dir,
-                        timeout=300
+                        timeout=10000
                     )
                     logger.info(f"recreate_script.py stdout: {result.stdout[:500]}...")
                     if result.stderr:
@@ -442,38 +481,68 @@ class ResourceUpdateService:
                 
                 try:
                     logger.info("🚀 Запускаем subprocess для postgres_adapter.py...")
-                    result = subprocess.run(
+                    
+                    # Используем Popen для потоковой обработки вывода
+                    process = subprocess.Popen(
                         cmd,
-                        capture_output=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
                         text=True,
                         cwd=scripts_dir,
-                        timeout=300  # 5 минут таймаут
+                        bufsize=1,
+                        universal_newlines=True
                     )
                     
-                    logger.info(f"📤 postgres_adapter.py stdout (первые 500 символов):")
-                    logger.info(result.stdout[:500])
+                    # Читаем вывод в реальном времени
+                    while True:
+                        stdout_line = process.stdout.readline()
+                        stderr_line = process.stderr.readline()
+                        
+                        if stdout_line:
+                            stdout_line = stdout_line.rstrip()
+                            if stdout_line:  # Не логируем пустые строки
+                                logger.info(f"📤 [postgres_adapter] {stdout_line}")
+                        
+                        if stderr_line:
+                            stderr_line = stderr_line.rstrip()
+                            if stderr_line:  # Не логируем пустые строки
+                                logger.error(f"❌ [postgres_adapter] {stderr_line}")
+                        
+                        # Проверяем завершился ли процесс
+                        if process.poll() is not None:
+                            # Читаем остатки вывода
+                            for stdout_line in process.stdout.readlines():
+                                stdout_line = stdout_line.rstrip()
+                                if stdout_line:
+                                    logger.info(f"📤 [postgres_adapter] {stdout_line}")
+                            
+                            for stderr_line in process.stderr.readlines():
+                                stderr_line = stderr_line.rstrip()
+                                if stderr_line:
+                                    logger.error(f"❌ [postgres_adapter] {stderr_line}")
+                            break
                     
-                    if result.stdout and len(result.stdout) > 500:
-                        logger.info(f"... (еще {len(result.stdout) - 500} символов)")
+                    # Ждем завершения
+                    returncode = process.wait(timeout=600)  # Увеличиваем таймаут до 10 минут
                     
-                    if result.stderr:
-                        logger.error(f"❌ postgres_adapter.py stderr:")
-                        logger.error(result.stderr[:500])
-                        if len(result.stderr) > 500:
-                            logger.error(f"... (еще {len(result.stderr) - 500} символов)")
-                    
-                    logger.info(f"📊 Код возврата: {result.returncode}")
+                    logger.info(f"📊 Код возврата postgres_adapter.py: {returncode}")
                     
                     # Проверяем успешность выполнения
-                    if result.returncode == 0:
+                    if returncode == 0:
                         logger.info("✅ База данных успешно обновлена")
                         return True
                     else:
-                        logger.error(f"❌ Ошибка при обновлении БД (код возврата: {result.returncode})")
+                        logger.error(f"❌ Ошибка при обновлении БД (код возврата: {returncode})")
                         return False
                         
                 except subprocess.TimeoutExpired:
-                    logger.error(f"❌ Таймаут выполнения postgres_adapter.py (больше 300 секунд)")
+                    logger.error(f"❌ Таймаут выполнения postgres_adapter.py (больше 600 секунд)")
+                    if process:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
                     return False
                 except Exception as e:
                     logger.error(f"❌ Ошибка при запуске postgres_adapter.py: {e}")
@@ -497,24 +566,26 @@ class ResourceUpdateService:
             "new_resources": 0,
             "updated_resources": 0,
             "database_reloaded": False,
+            "database_status": "not_started",
             "errors": []
         }
         
         try:
-            # Перезагрузка базы данных
-            print(f"🚀 Вызываем reload_relational_database для перезагрузки БД")
-            results["database_reloaded"] = self.reload_relational_database(
+            # Асинхронная перезагрузка базы данных
+            print(f"🚀 Запускаем асинхронную перезагрузку БД")
+            db_result = self.reload_relational_database_async(
                 reload_database=reload_database,
                 use_stubs=use_stubs,
                 incremental=incremental
             )
             
-            if results["database_reloaded"]:
-                print("✅ База данных успешно перезагружена")
-                results["update_type"] = "полное" if not incremental else "инкрементальное"
-            else:
-                results["errors"].append("Не удалось перезагрузить базу данных")
-                print("❌ Ошибка при перезагрузке базы данных")
+            # Копируем информацию о запуске
+            results.update(db_result)
+            results["database_reloaded"] = True
+            results["update_type"] = "полное" if not incremental else "инкрементальное"
+            
+            print(f"✅ Перезагрузка базы данных запущена в фоновом режиме")
+            print(f"📊 Детали: {db_result['message']}")
             
             return results
             
@@ -626,7 +697,7 @@ class ResourceUpdateService:
                         json.dump({"resources": new_resources_list}, f, ensure_ascii=False, indent=2)
                     logger.info(f"📄 Создан временный файл с {len(new_resources_list)} новыми ресурсами: {temp_json_file}")
                 
-                results["database_reloaded"] = self.reload_relational_database(
+                db_result = self.reload_relational_database_async(
                     reload_database=reload_database,
                     use_stubs=use_stubs,
                     incremental=incremental,
