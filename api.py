@@ -2342,6 +2342,40 @@ def search_images_by_features():
             
             # Добавляем debug информацию
             if debug_mode:
+                # Функция для обрезки URL для отображения в Telegram
+                def truncate_url_for_telegram(url):
+                    """Обрезает URL, убирая протокол и домен для отображения в Telegram"""
+                    if not url:
+                        return ""
+                    # Убираем протоколы http://, https://
+                    url = url.replace('http://', '').replace('https://', '')
+                    # Убираем домен до первого слэша
+                    parts = url.split('/', 1)
+                    if len(parts) > 1:
+                        return parts[1]  # Возвращаем путь без домена
+                    return url
+                
+                # Собираем информацию о найденных изображениях
+                found_images_info = []
+                if result.get("status") == "success" and result.get("images"):
+                    for idx, image in enumerate(result["images"]):
+                        image_info = {
+                            "index": idx + 1,
+                            "title": image.get("title", "Без названия"),
+                            "species": image.get("species_name", "Не указан"),
+                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
+                        }
+                        
+                        # Добавляем информацию о признаках, если они есть
+                        features = image.get("features", {})
+                        if features:
+                            image_info["features"] = {}
+                            for key, value in features.items():
+                                if value and str(value).strip():  # Добавляем только непустые значения
+                                    image_info["features"][key] = value
+                        
+                        found_images_info.append(image_info)
+                
                 debug_info["search_type"] = "with_species"
                 debug_info["synonyms_used"] = result.get("synonyms_used", {})
                 debug_info["database_query"] = {
@@ -2349,10 +2383,31 @@ def search_images_by_features():
                     "feature_conditions": list(features.keys())
                 }
                 debug_info["stoplist_filter"] = {
-                    "total_before_filter": len(result.get("images", [])),
+                    "total_before_filter": len(result.get("images", [])) + len(stoplisted_images),
                     "safe_after_filter": len(safe_images),
                     "stoplisted_count": len(stoplisted_images)
                 }
+                debug_info["found_images"] = {
+                    "count": len(found_images_info),
+                    "images": found_images_info
+                }
+                logger.info('Найденные изображения')
+                logger.info(debug_info["found_images"])
+                # Добавляем также информацию об исключенных изображениях (опционально)
+                if stoplisted_images:
+                    stoplisted_info = []
+                    for idx, image in enumerate(stoplisted_images):
+                        stoplisted_info.append({
+                            "index": idx + 1,
+                            "title": image.get("title", "Без названия"),
+                            "in_stoplist": image.get("features", {}).get("in_stoplist"),
+                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
+                        })
+                    debug_info["stoplisted_images"] = {
+                        "count": len(stoplisted_info),
+                        "images": stoplisted_info
+                    }
+                
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
@@ -2425,15 +2480,70 @@ def search_images_by_features():
             
             # Добавляем debug информацию
             if debug_mode:
+                # Функция для обрезки URL для отображения в Telegram
+                def truncate_url_for_telegram(url):
+                    """Обрезает URL, убирая протокол и домен для отображения в Telegram"""
+                    if not url:
+                        return ""
+                    # Убираем протоколы http://, https://
+                    url = url.replace('http://', '').replace('https://', '')
+                    # Убираем домен до первого слэша
+                    parts = url.split('/', 1)
+                    if len(parts) > 1:
+                        return parts[1]  # Возвращаем путь без домена
+                    return url
+                
+                # Собираем информацию о найденных изображениях
+                found_images_info = []
+                if result.get("status") == "success" and result.get("images"):
+                    for idx, image in enumerate(result["images"]):
+                        image_info = {
+                            "index": idx + 1,
+                            "title": image.get("title", "Без названия"),
+                            "species": image.get("species_name", "Не указан"),
+                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
+                        }
+                        
+                        # Добавляем информацию о признаках, если они есть
+                        img_features = image.get("features", {})
+                        if img_features:
+                            image_info["features"] = {}
+                            for key, value in img_features.items():
+                                if value and str(value).strip():  # Добавляем только непустые значения
+                                    image_info["features"][key] = value
+                        
+                        found_images_info.append(image_info)
+                
                 debug_info["search_type"] = "features_only"
                 debug_info["database_query"] = {
                     "feature_conditions": list(features.keys())
                 }
                 debug_info["stoplist_filter"] = {
-                    "total_before_filter": len(result.get("images", [])),
+                    "total_before_filter": len(result.get("images", [])) + len(stoplisted_images),
                     "safe_after_filter": len(safe_images),
                     "stoplisted_count": len(stoplisted_images)
                 }
+                debug_info["found_images"] = {
+                    "count": len(found_images_info),
+                    "images": found_images_info
+                }
+                logger.info('Найденные изображения')
+                logger.info(debug_info["found_images"])
+                # Добавляем также информацию об исключенных изображениях (опционально)
+                if stoplisted_images:
+                    stoplisted_info = []
+                    for idx, image in enumerate(stoplisted_images):
+                        stoplisted_info.append({
+                            "index": idx + 1,
+                            "title": image.get("title", "Без названия"),
+                            "in_stoplist": image.get("features", {}).get("in_stoplist"),
+                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
+                        })
+                    debug_info["stoplisted_images"] = {
+                        "count": len(stoplisted_info),
+                        "images": stoplisted_info
+                    }
+                
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
@@ -2455,7 +2565,7 @@ def search_images_by_features():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-    
+     
 @app.route("/object/description/", methods=["GET", "POST"])
 def get_object_description():
     # Обработка GET параметров

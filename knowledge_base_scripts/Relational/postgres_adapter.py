@@ -1564,7 +1564,14 @@ class NewResourceImporter:
             feature_photo = resource.get('featurePhoto', {})
             name_info = identificator.get('name', {})
             
+            # Получаем правильный заголовок
             title = self.get_title(resource)
+            
+            # Получаем правильный путь к файлу из access_options
+            file_path = access.get('file_path')
+            if not file_path:
+                # Если нет в access_options, берем из feature_photo
+                file_path = feature_photo.get('file_path')
             
             # ФИКС: Сохраняем in_stoplist как число
             in_stoplist_value = self.safe_convert_in_stoplist(resource.get('in_stoplist'))
@@ -1576,8 +1583,26 @@ class NewResourceImporter:
             elif baikal_relation is None:
                 baikal_relation = []
             
-            # Копируем feature_photo и добавляем дополнительные поля
-            image_feature_data = feature_photo.copy() if feature_photo else {}
+            # Создаем feature_data для изображения
+            image_feature_data = {}
+            if feature_photo:
+                # Копируем только нужные поля из feature_photo
+                image_feature_data.update({
+                    'date': feature_photo.get('date'),
+                    'season': feature_photo.get('season'),
+                    'habitat': feature_photo.get('habitat'),
+                    'location': feature_photo.get('location', {}),
+                    'cloudiness': feature_photo.get('cloudiness'),
+                    'fauna_type': feature_photo.get('fauna_type'),
+                    'flora_type': feature_photo.get('flora_type'),
+                    'name_photo': feature_photo.get('name_photo'),
+                    'name_object': feature_photo.get('name_object'),
+                    'author_photo': feature_photo.get('author_photo'),
+                    'image_caption': feature_photo.get('image_caption'),
+                    'classification_info': feature_photo.get('classification_info', {}),
+                    'flower_and_fruit_info': feature_photo.get('flower_and_fruit_info', {}),
+                    'yolo_detected_objects': feature_photo.get('yolo_detected_objects', [])
+                })
             
             # Добавляем основные поля
             image_feature_data['in_stoplist'] = in_stoplist_value
@@ -1586,56 +1611,64 @@ class NewResourceImporter:
             image_feature_data['information_subtype'] = resource.get('information_subtype', '')
             
             # Добавляем идентификатор и доступные опции
-            image_feature_data['identificator'] = identificator
-            image_feature_data['access_options'] = access
+            image_feature_data['identificator'] = {
+                'id': identificator.get('id'),
+                'uri': identificator.get('uri'),
+                'name': {
+                    'common': name_info.get('common'),
+                    'source': name_info.get('source')
+                }
+            }
+            image_feature_data['access_options'] = {
+                'author': access.get('author'),
+                'source_url': access.get('source_url'),
+                'original_title': access.get('original_title')
+            }
             
-            # Обрабатываем flower_and_fruit_info если есть
-            flower_info = feature_photo.get('flower_and_fruit_info')
-            if flower_info:
-                image_feature_data['flower_and_fruit_info'] = flower_info
-            
-            # Сохраняем новые поля биологических характеристик
-            biological_fields = [
-                'behavior', 'surface_type', 'placed', 'interaction', 
-                'mood', 'age', 'lifeform', 'sex'
-            ]
-            
-            for field in biological_fields:
-                value = feature_photo.get(field)
-                if value and value not in ['Неопределено', 'Неопределён']:
-                    image_feature_data[field] = value
-            
-            # ИЩЕМ ДУБЛИКАТЫ ПЕРЕД ВСТАВКОЙ
-            existing_image_id = self.find_existing_image(image_feature_data)
+            # ИЩЕМ ДУБЛИКАТЫ ПЕРЕД ВСТАВКОЙ с более строгими критериями
+            existing_image_id = self.find_existing_image(file_path, title, image_feature_data)
             if existing_image_id:
-                print(f"⚠️  Изображение уже существует в БД (id: {existing_image_id}), обновляем...")
-                image_id = existing_image_id
-                
-                # Обновляем существующую запись
-                self.cur.execute(
-                    "UPDATE image_content SET title = %s, description = %s, feature_data = %s WHERE id = %s",
-                    (
-                        title,
-                        feature_photo.get('image_caption'),
-                        Json(image_feature_data),
-                        image_id
-                    )
-                )
-            else:
-                # Вставляем новую запись
-                self.cur.execute(
-                    "INSERT INTO image_content (title, description, feature_data) "
-                    "VALUES (%s, %s, %s) RETURNING id",
-                    (
-                        title,
-                        feature_photo.get('image_caption'),
-                        Json(image_feature_data)
-                    )
-                )
-                image_id = self.cur.fetchone()[0]
+                print(f"⚠️  Изображение уже существует в БД (id: {existing_image_id}), пропускаем...")
+                return existing_image_id  # Возвращаем существующий ID, но не обновляем
             
+            # Вставляем новую запись
+            self.cur.execute(
+                "INSERT INTO image_content (title, description, feature_data) "
+                "VALUES (%s, %s, %s) RETURNING id",
+                (
+                    title,
+                    image_feature_data.get('image_caption', ''),
+                    Json(image_feature_data)
+                )
+            )
+            image_id = self.cur.fetchone()[0]
             entity_type = 'image_content'
             
+            # Добавляем информацию о достоверности
+            self.add_reliability('image_content', image_id, name_info.get('source'))
+            
+            # СОЗДАЕМ ИДЕНТИФИКАТОР С ПРАВИЛЬНЫМ ПУТЕМ К ФАЙЛУ
+            self.cur.execute(
+                "INSERT INTO entity_identifier (url, file_path, name_ru, name_en, name_latin) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (
+                    access.get('source_url', ''),
+                    file_path,  # Используем правильный путь к файлу
+                    title,
+                    name_info.get('en_name'),
+                    name_info.get('scientific')
+                )
+            )
+            identifier_id = self.cur.fetchone()[0]
+            
+            # Связываем идентификатор с изображением
+            self.cur.execute(
+                "INSERT INTO entity_identifier_link (entity_id, entity_type, identifier_id) "
+                "VALUES (%s, %s, %s)",
+                (image_id, entity_type, identifier_id)
+            )
+            
+            # Обработка автора
             author_name = access.get('author')
             if not author_name:
                 # Попробуем получить из feature_photo
@@ -1655,26 +1688,8 @@ class NewResourceImporter:
             else:
                 print("⚠️  Автор не найден в ресурсе")
             
-            # Добавляем информацию о достоверности только для новых записей
-            if not existing_image_id:
-                self.add_reliability('image_content', image_id, name_info.get('source'))
-            
-            # Создаем или обновляем идентификатор
-            self.create_entity_identifier(image_id, entity_type, identificator, access)
-            
-            # Обработка автора
-            author_name = access.get('author')
-            if author_name:
-                author_id = self.get_or_create_author(author_name)
-                if author_id:
-                    self.cur.execute(
-                        "INSERT INTO entity_author (entity_id, entity_type, author_id) "
-                        "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                        (image_id, entity_type, author_id)
-                    )
-            
             # Обработка даты съемки
-            date_taken = feature_photo.get('date')
+            date_taken = image_feature_data.get('date')
             if date_taken:
                 parsed_date = self.parse_date(date_taken)
                 if parsed_date:
@@ -1724,16 +1739,16 @@ class NewResourceImporter:
                     except Exception as e:
                         print(f"⚠️ Ошибка обработки погодных условий: {e}")
             
-            # Обработка биологических сущностей - ВАЖНОЕ ИСПРАВЛЕНИЕ
-            classification = feature_photo.get('classification_info', {})
+            # Обработка биологических сущностей
+            classification = image_feature_data.get('classification_info', {})
             result_info = classification.get('result', {}) if classification else {}
             
             # Определяем тип информации для биологической сущности
             information_subtype = resource.get('information_subtype')
             if not information_subtype:
                 # Пытаемся определить тип из feature_photo
-                flora_type = feature_photo.get('flora_type')
-                fauna_type = feature_photo.get('fauna_type')
+                flora_type = image_feature_data.get('flora_type')
+                fauna_type = image_feature_data.get('fauna_type')
                 
                 if flora_type and flora_type != 'Неопределено':
                     information_subtype = 'Объект флоры'
@@ -1751,7 +1766,7 @@ class NewResourceImporter:
                     entity_type,
                     name_info,
                     result_info,  # Передаем result_info как classification
-                    feature_photo,
+                    image_feature_data,
                     information_subtype
                 )
                 
@@ -1759,7 +1774,7 @@ class NewResourceImporter:
                     print(f"✅ Создана/найдена биологическая сущность {bio_id} для изображения {image_id}")
             
             # Обработка географических данных
-            location = feature_photo.get('location', {})
+            location = image_feature_data.get('location', {})
             if location:
                 geo_id = self.process_geographical_data(
                     image_id, 
@@ -1770,8 +1785,7 @@ class NewResourceImporter:
                 if geo_id:
                     print(f"✅ Создана/найдена географическая сущность {geo_id} для изображения {image_id}")
             
-            mode = "обновлено" if existing_image_id else "создано"
-            print(f"✅ {mode.capitalize()} изображение: {title} (id: {image_id})")
+            print(f"✅ Создано изображение: {title} (id: {image_id}), путь: {file_path}")
             return image_id
             
         except Exception as e:
@@ -1780,28 +1794,73 @@ class NewResourceImporter:
             traceback.print_exc()
             return None
 
-    def find_existing_image(self, feature_data):
-        """Ищет существующее изображение по ключевым полям"""
+    def find_existing_image(self, file_path, title, feature_data):
+        """Ищет существующее изображение по URL/пути к файлу и ключевым полям"""
         try:
             name_photo = feature_data.get('name_photo')
             author_photo = feature_data.get('author_photo')
             date = feature_data.get('date')
             
-            if not name_photo:
-                return None
+            # Приоритет 1: Поиск по file_path (самый надежный критерий)
+            if file_path:
+                # Ищем в entity_identifier по file_path
+                self.cur.execute(
+                    "SELECT eil.entity_id FROM entity_identifier ei "
+                    "JOIN entity_identifier_link eil ON ei.id = eil.identifier_id "
+                    "WHERE ei.file_path = %s AND eil.entity_type = 'image_content' "
+                    "LIMIT 1",
+                    (file_path,)
+                )
+                result = self.cur.fetchone()
+                if result:
+                    print(f"🔍 Найдено существующее изображение по file_path: {file_path}")
+                    return result[0]
             
-            # Ищем по комбинации полей
-            self.cur.execute(
-                "SELECT id FROM image_content "
-                "WHERE feature_data->>'name_photo' = %s "
-                "AND feature_data->>'author_photo' = %s "
-                "AND feature_data->>'date' = %s "
-                "LIMIT 1",
-                (name_photo, author_photo, date)
-            )
+            # Приоритет 2: Поиск по уникальной комбинации полей в feature_data
+            if name_photo and author_photo and date:
+                self.cur.execute(
+                    "SELECT id FROM image_content "
+                    "WHERE feature_data->>'name_photo' = %s "
+                    "AND feature_data->>'author_photo' = %s "
+                    "AND feature_data->>'date' = %s "
+                    "LIMIT 1",
+                    (name_photo, author_photo, date)
+                )
+                result = self.cur.fetchone()
+                if result:
+                    print(f"🔍 Найдено существующее изображение по name_photo: {name_photo}")
+                    return result[0]
             
-            result = self.cur.fetchone()
-            return result[0] if result else None
+            # Приоритет 3: Поиск по заголовку и ключевым полям
+            if title:
+                self.cur.execute(
+                    "SELECT id FROM image_content "
+                    "WHERE title = %s "
+                    "AND (feature_data->>'name_photo' = %s OR %s IS NULL) "
+                    "LIMIT 1",
+                    (title, name_photo, name_photo)
+                )
+                result = self.cur.fetchone()
+                if result:
+                    print(f"🔍 Найдено существующее изображение по title: {title}")
+                    return result[0]
+            
+            # Приоритет 4: Поиск по URL в entity_identifier
+            source_url = feature_data.get('access_options', {}).get('source_url')
+            if source_url:
+                self.cur.execute(
+                    "SELECT eil.entity_id FROM entity_identifier ei "
+                    "JOIN entity_identifier_link eil ON ei.id = eil.identifier_id "
+                    "WHERE ei.url = %s AND eil.entity_type = 'image_content' "
+                    "LIMIT 1",
+                    (source_url,)
+                )
+                result = self.cur.fetchone()
+                if result:
+                    print(f"🔍 Найдено существующее изображение по source_url: {source_url}")
+                    return result[0]
+            
+            return None
             
         except Exception as e:
             print(f"Error finding existing image: {e}")
