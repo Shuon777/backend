@@ -338,17 +338,25 @@ class NewResourceImporter:
             return None
         
     def _get_species_synonyms_path(self):
-        """Определяем путь к файлу species_synonyms.json"""
+        """Определяем путь к файлу object_synonyms.json"""
         current_dir = Path(__file__).parent
         base_dir = current_dir.parent.parent
         json_files_dir = base_dir / "json_files"
-        return json_files_dir / "species_synonyms.json"
+        return json_files_dir / "object_synonyms.json"
     
     def load_species_synonyms(self):
         """Загрузка синонимов видов из JSON-файла"""
         try:
             with open(self.species_synonyms_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            
+            # Извлекаем только раздел biological_entity из нового формата
+            if 'biological_entity' in data:
+                return data['biological_entity']
+            else:
+                print(f"⚠️ В файле {self.species_synonyms_path} нет раздела 'biological_entity'")
+                return {}
+                
         except FileNotFoundError:
             print(f"Файл синонимов {self.species_synonyms_path} не найден. Будет использован пустой словарь.")
             return {}
@@ -360,11 +368,19 @@ class NewResourceImporter:
         """Нормализация названия вида с учетом синонимов"""
         if not name:
             return name
-            
+        
         name_lower = name.strip().lower()
+        
         for main_name, synonyms in self.species_synonyms.items():
-            if name_lower in [s.lower() for s in synonyms] or name_lower == main_name.lower():
+            main_name_lower = main_name.lower()
+            
+            if name_lower == main_name_lower:
                 return main_name
+            
+            for synonym in synonyms:
+                if name_lower == synonym.lower():
+                    return main_name 
+        
         return name
     
     def parse_date(self, date_str):
@@ -1759,13 +1775,20 @@ class NewResourceImporter:
                 elif 'fauna' in str(resource.get('information_type', '')).lower():
                     information_subtype = 'Объект фауны'
             
-            # Создаем биологическую сущность если есть классификация или имя
-            if result_info or (name_info.get('common') and information_subtype):
+            common_name = name_info.get('common') or result_info.get('species') or result_info.get('name')
+            classification = image_feature_data.get('classification_info', {})
+            result_info = classification.get('result', classification) if classification else {}
+
+            has_classification = bool(result_info and any(
+                v for k, v in result_info.items() 
+                if k != 'source' and v and str(v).strip()
+            ))
+            if has_classification or (common_name and information_subtype):
                 bio_id = self.process_biological_entity(
                     image_id, 
                     entity_type,
                     name_info,
-                    result_info,  # Передаем result_info как classification
+                    result_info,
                     image_feature_data,
                     information_subtype
                 )

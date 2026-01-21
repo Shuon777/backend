@@ -238439,64 +238439,6 @@
       "baikal_relation": "рядом/около Байкала",
       "blacklist_detected": false,
       "finish_reason": "success"
-    },
-    {
-      "type": "Изображение",
-      "identificator": {
-        "id": "MEDIA_featurePhoto78",
-        "uri": "istu.edu/va/baikal/daniil/Siberian_fir",
-        "name": {
-          "common": "Пихта Сибирская",
-          "en_name": null,
-          "scientific": null,
-          "source": "Национальный парк/Заповедник"
-        }
-      },
-      "access_options": {
-        "author": "Светлана Мещерягина",
-        "file_path": "https://testecobot.ru/images/flora/Abies_sibirica/Siberian_fir/148953748.jpg",
-        "source_url": "",
-        "original_title": "148953748.jpg. Фото Светлана Мещерягина",
-        "rights": "cc-by-nc"
-      },
-      "featurePhoto": {
-        "name_photo": "148953748.jpg",
-        "parent": "Siberian fir",
-        "author_photo": "Светлана Мещерягина",
-        "name_object": "Пихта Сибирская",
-        "season": "Весна",
-        "sex": "Неопределёно",
-        "habitat": "Лес",
-        "flora_type": "Мох",
-        "fauna_type": "",
-        "cloudiness": "Пасмурно",
-        "classification_info": {
-          "family": "Сосновые",
-          "genus": "Пихта",
-          "species": "Пихта Сибирская"
-        },
-        "date": "2021-06-28 17:14:00",
-        "location": {
-          "country": "",
-          "region": "",
-          "coordinates": {
-            "latitude": 51.767361,
-            "longitude": 89.799778
-          }
-        },
-        "image_caption": "the sky is cloudy",
-        "yolo_detected_objects": [],
-        "flower_and_fruit_info": {
-          "flowering": "Да",
-          "fruits_present": "Нет",
-          "flower_color": "#7C7E50"
-        },
-        "surface_type": "Дерево (доски)",
-        "placed": "В небе",
-        "age": "Неопределёно",
-        "temperature": " ",
-        "wind": "Штормовой ветер"
-      }
     }
   ]
 }

@@ -5,6 +5,8 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import unquote
+
+from flask import Response
 import redis
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -268,25 +270,27 @@ def reload_database():
 @require_admin_password  
 def upload_resources():
     """
-    Эндпоинт для загрузки архивов с аннотациями и изображениями
+    Эндпоинт для загрузки архивов с аннотациями и изображениями по чанкам
     
     Принимает:
     - json_archive: zip архив с JSON аннотациями (не обязательно)
     - images_archive: zip архив с изображениями (не обязательно)
-    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ для обновления БД
+    - reload_database: флаг перезагрузки реляционной базы (true/false)
     - incremental_update: флаг инкрементального обновления (true/false)
     - use_stubs: флаг использования заглушек для векторов (true/false)
+    - chunked: флаг обработки по чанкам (true/false) - по умолчанию true
     """
     try:
-        logger.info(f"📤 /upload_resources - получен запрос")
+        logger.info(f"📤 /upload_resources - получен запрос с поддержкой чанков")
         
         # Проверяем наличие файлов
         has_json = 'json_archive' in request.files and request.files['json_archive'].filename
         has_images = 'images_archive' in request.files and request.files['images_archive'].filename
         
         reload_database = request.form.get('reload_database', 'false').lower() == 'true'
-        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'  # По умолчанию true
+        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'
         use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        chunked_processing = request.form.get('chunked', 'true').lower() == 'true'
         
         logger.info(f"Параметры запроса:")
         logger.info(f"  - Есть JSON архив: {has_json}")
@@ -294,11 +298,7 @@ def upload_resources():
         logger.info(f"  - reload_database: {reload_database}")
         logger.info(f"  - incremental_update: {incremental_update}")
         logger.info(f"  - use_stubs: {use_stubs}")
-        
-        # ВАЖНО: Проверяем значения
-        logger.info(f"🔍 Проверка значений из request.form:")
-        for key in request.form:
-            logger.info(f"  - {key}: {request.form.get(key)}")
+        logger.info(f"  - chunked_processing: {chunked_processing}")
         
         # Проверяем существование ресурсного файла
         if not os.path.exists(RESOURCES_DIST_PATH):
@@ -312,9 +312,7 @@ def upload_resources():
             except Exception as e:
                 return jsonify({
                     "status": "error",
-                    "message": f"Не удалось создать resources_dist.json: {str(e)}",
-                    "used_objects": [],
-                    "not_used_objects": []
+                    "message": f"Не удалось создать resources_dist.json: {str(e)}"
                 }), 500
         
         # Создаем временную папку для сохранения архивов
@@ -342,76 +340,94 @@ def upload_resources():
             # Создаем сервис для обработки
             service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
             
-            # Обрабатываем загрузку
-            results = service.process_upload(
-                json_archive_path=json_archive_path,
-                images_archive_path=images_archive_path,
-                reload_database=reload_database,
-                use_stubs=use_stubs,
-                incremental=incremental_update  # Передаем параметр
-            )
-            
-            # Добавляем информацию о типе обновления
-            if reload_database:
-                results["update_type"] = "полное" if not incremental_update else "инкрементальное"
+            # Если запрошена обработка по чанкам
+            if chunked_processing:
+                logger.info("🚀 Запускаем обработку по чанкам с прогрессом")
+                
+                # Используем генератор для обработки по чанкам
+                def generate_progress():
+                    try:
+                        for progress_update in service.process_upload_chunked(
+                            json_archive_path=json_archive_path,
+                            images_archive_path=images_archive_path,
+                            reload_database=reload_database,
+                            use_stubs=use_stubs,
+                            incremental=incremental_update
+                        ):
+                            # Отправляем прогресс как Server-Sent Events
+                            yield f"data: {json.dumps(progress_update, ensure_ascii=False)}\n\n"
+                            
+                            # Если обработка завершена, выходим
+                            if progress_update.get("stage") == "completed":
+                                break
+                                
+                    except Exception as e:
+                        logger.error(f"Ошибка в генераторе прогресса: {str(e)}")
+                        yield f"data: {json.dumps({'status': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+                
+                # Возвращаем потоковый ответ с прогрессом
+                return Response(
+                    generate_progress(),
+                    mimetype='text/event-stream',
+                    headers={
+                        'Cache-Control': 'no-cache',
+                        'Connection': 'keep-alive',
+                        'X-Accel-Buffering': 'no'  # Отключаем буферизацию для nginx
+                    }
+                )
             else:
-                results["update_type"] = "без обновления БД"
-            
-            if reload_database and results.get("database_status") == "started":
-                response_data = {
-                    "status": "success",
-                    "message": "Ресурсы успешно обработаны. Перезагрузка базы данных запущена в фоновом режиме.",
-                    "details": results.get("database_message", "Можете следить за прогрессом в логах"),
-                    "results": {
-                        "json_processed": results.get("json_processed", 0),
-                        "images_processed": results.get("images_processed", 0),
-                        "new_resources": results.get("new_resources", 0),
-                        "updated_resources": results.get("updated_resources", 0),
-                        "database_status": "started",
-                        "update_type": results.get("update_type", "неизвестно"),
-                        "use_stubs": use_stubs
-                    },
-                    "used_objects": [
-                        {
-                            "name": "resources_dist.json",
-                            "type": "configuration",
-                            "operation": "update"
+                # Старая обработка (для обратной совместимости)
+                logger.info("🔄 Используем старую обработку без чанков")
+                results = service.process_upload(
+                    json_archive_path=json_archive_path,
+                    images_archive_path=images_archive_path,
+                    reload_database=reload_database,
+                    use_stubs=use_stubs,
+                    incremental=incremental_update
+                )
+                
+                # Добавляем информацию о типе обновления
+                if reload_database:
+                    results["update_type"] = "полное" if not incremental_update else "инкрементальное"
+                else:
+                    results["update_type"] = "без обновления БД"
+                
+                if reload_database and results.get("database_status") == "started":
+                    response_data = {
+                        "status": "success",
+                        "message": "Ресурсы успешно обработаны. Перезагрузка базы данных запущена в фоновом режиме.",
+                        "details": "Можете следить за прогрессом в логах",
+                        "results": {
+                            "json_processed": results.get("json_processed", 0),
+                            "images_processed": results.get("images_processed", 0),
+                            "new_resources": results.get("new_resources", 0),
+                            "updated_resources": results.get("updated_resources", 0),
+                            "database_status": "started",
+                            "update_type": results.get("update_type", "неизвестно"),
+                            "use_stubs": use_stubs
                         }
-                    ],
-                    "not_used_objects": []
-                }
-            else:
-                # Существующий ответ для случая без перезагрузки БД
-                response_data = {
-                    "status": "success",
-                    "message": "Ресурсы успешно обработаны",
-                    "results": results,
-                    "used_objects": [
-                        {
-                            "name": "resources_dist.json",
-                            "type": "configuration",
-                            "operation": "update"
-                        }
-                    ],
-                    "not_used_objects": []
-                }
-            
-            if results.get("errors"):
-                response_data["status"] = "partial_success"
-                response_data["message"] = f"Обработка завершена с ошибками"
-            
-            logger.info(f"✅ Обработка завершена, отправляем немедленный ответ")
-            return jsonify(response_data)
-            
+                    }
+                else:
+                    response_data = {
+                        "status": "success",
+                        "message": "Ресурсы успешно обработаны",
+                        "results": results
+                    }
+                
+                if results.get("errors"):
+                    response_data["status"] = "partial_success"
+                    response_data["message"] = f"Обработка завершена с ошибками"
+                
+                logger.info(f"✅ Обработка завершена")
+                return jsonify(response_data)
+                
         except Exception as e:
             logger.error(f"❌ Ошибка обработки загрузки: {str(e)}")
             import traceback
             traceback.print_exc()
             return jsonify({
                 "status": "error",
-                "message": f"Ошибка обработки: {str(e)}",
-                "used_objects": [],
-                "not_used_objects": []
+                "message": f"Ошибка обработки: {str(e)}"
             }), 500
             
         finally:
@@ -429,14 +445,8 @@ def upload_resources():
         traceback.print_exc()
         return jsonify({
             "status": "error",
-            "message": f"Внутренняя ошибка сервера: {str(e)}",
-            "used_objects": [],
-            "not_used_objects": []
+            "message": f"Внутренняя ошибка сервера: {str(e)}"
         }), 500
-
-# ============================================================================
-# НОВЫЙ ЭНДПОИНТ: Загрузка одного изображения с аннотацией
-# ============================================================================
 @app.route("/upload_single_resource", methods=["POST"])
 @require_admin_password
 def upload_single_resource():
@@ -603,7 +613,8 @@ def upload_single_resource():
             
             # 5. Обрабатываем как одиночный JSON файл
             logger.info(f"Начинаем обработку JSON файла: {json_path}")
-            new_resources_list, new_count, updated_count = service.process_json_file(json_path)
+            # ИСПРАВЛЕНИЕ: Используем process_single_json_file вместо process_json_file
+            new_resources_list, new_count, updated_count = service.process_single_json_file(json_path)
             
             logger.info(f"Результат обработки JSON:")
             logger.info(f"  - Новые ресурсы: {new_count}")
