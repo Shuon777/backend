@@ -5,8 +5,6 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import unquote
-
-from flask import Response
 import redis
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -35,8 +33,7 @@ import os
 from pathlib import Path
 from werkzeug.utils import secure_filename
 import tempfile
-import secrets
-from functools import wraps
+
 # Добавим импорт нашего сервиса
 from core.resource_update_service import ResourceUpdateService
 BASE_DIR = Path(__file__).parent
@@ -66,9 +63,10 @@ init_redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
 
 current_dir = Path(__file__).parent
 embedding_model_path = str(current_dir / "embedding_models" / "BERTA")
-
+faiss_index_path = str(current_dir / "knowledge_base_scripts" / "Vector" / "faiss_index")
 search_service = SearchService(
-    embedding_model_path=embedding_model_path
+    embedding_model_path=embedding_model_path,
+    faiss_index_path=faiss_index_path
 )
 relational_service = RelationalService()
 
@@ -81,28 +79,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 matplotlib_logger = logging.getLogger('matplotlib')
 matplotlib_logger.setLevel(logging.WARNING)
-
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "default_admin_password")  
-def require_admin_password(f):
-    """Декоратор для проверки пароля админа"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        provided_password = request.args.get('admin_password') or request.headers.get('X-Admin-Password')
-        
-        if not provided_password:
-            return jsonify({
-                "status": "error",
-                "message": "Требуется пароль администратора"
-            }), 401
-        
-        if not secrets.compare_digest(provided_password, ADMIN_PASSWORD):
-            return jsonify({
-                "status": "error", 
-                "message": "Неверный пароль администратора"
-            }), 403
-            
-        return f(*args, **kwargs)
-    return decorated_function
 
 @app.route("/log_error", methods=["POST"])
 def log_error():
@@ -179,9 +155,7 @@ def log_error():
             "used_objects": [],
             "not_used_objects": []
         }), 500
-        
 @app.route("/reload_database", methods=["POST"])
-@require_admin_password
 def reload_database():
     """
     Эндпоинт для перезагрузки базы данных без добавления новых ресурсов
@@ -267,30 +241,26 @@ def reload_database():
         }), 500
         
 @app.route("/upload_resources", methods=["POST"])
-@require_admin_password  
 def upload_resources():
     """
-    Эндпоинт для загрузки архивов с аннотациями и изображениями по чанкам
+    Эндпоинт для загрузки архивов с аннотациями и изображениями
     
     Принимает:
     - json_archive: zip архив с JSON аннотациями (не обязательно)
     - images_archive: zip архив с изображениями (не обязательно)
-    - reload_database: флаг перезагрузки реляционной базы (true/false)
+    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ для обновления БД
     - incremental_update: флаг инкрементального обновления (true/false)
     - use_stubs: флаг использования заглушек для векторов (true/false)
-    - chunked: флаг обработки по чанкам (true/false) - по умолчанию true
     """
     try:
-        logger.info(f"📤 /upload_resources - получен запрос с поддержкой чанков")
+        logger.info(f"📤 /upload_resources - получен запрос")
         
-        # Проверяем наличие файлов
         has_json = 'json_archive' in request.files and request.files['json_archive'].filename
         has_images = 'images_archive' in request.files and request.files['images_archive'].filename
         
         reload_database = request.form.get('reload_database', 'false').lower() == 'true'
-        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'
+        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'  # По умолчанию true
         use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
-        chunked_processing = request.form.get('chunked', 'true').lower() == 'true'
         
         logger.info(f"Параметры запроса:")
         logger.info(f"  - Есть JSON архив: {has_json}")
@@ -298,12 +268,13 @@ def upload_resources():
         logger.info(f"  - reload_database: {reload_database}")
         logger.info(f"  - incremental_update: {incremental_update}")
         logger.info(f"  - use_stubs: {use_stubs}")
-        logger.info(f"  - chunked_processing: {chunked_processing}")
         
-        # Проверяем существование ресурсного файла
+        logger.info(f"🔍 Проверка значений из request.form:")
+        for key in request.form:
+            logger.info(f"  - {key}: {request.form.get(key)}")
+        
         if not os.path.exists(RESOURCES_DIST_PATH):
             logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
-            # Создаем файл если не существует
             try:
                 os.makedirs(os.path.dirname(RESOURCES_DIST_PATH), exist_ok=True)
                 with open(RESOURCES_DIST_PATH, 'w', encoding='utf-8') as f:
@@ -312,16 +283,16 @@ def upload_resources():
             except Exception as e:
                 return jsonify({
                     "status": "error",
-                    "message": f"Не удалось создать resources_dist.json: {str(e)}"
+                    "message": f"Не удалось создать resources_dist.json: {str(e)}",
+                    "used_objects": [],
+                    "not_used_objects": []
                 }), 500
         
-        # Создаем временную папку для сохранения архивов
         temp_dir = tempfile.mkdtemp()
         json_archive_path = None
         images_archive_path = None
         
         try:
-            # Сохраняем JSON архив если есть
             if has_json:
                 json_file = request.files['json_archive']
                 filename = secure_filename(json_file.filename)
@@ -329,7 +300,6 @@ def upload_resources():
                 json_file.save(json_archive_path)
                 logger.info(f"Сохранен JSON архив: {json_archive_path} ({os.path.getsize(json_archive_path)} байт)")
             
-            # Сохраняем архив с изображениями если есть
             if has_images:
                 images_file = request.files['images_archive']
                 filename = secure_filename(images_file.filename)
@@ -337,432 +307,26 @@ def upload_resources():
                 images_file.save(images_archive_path)
                 logger.info(f"Сохранен архив с изображениями: {images_archive_path} ({os.path.getsize(images_archive_path)} байт)")
             
-            # Создаем сервис для обработки
             service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
             
-            # Если запрошена обработка по чанкам
-            if chunked_processing:
-                logger.info("🚀 Запускаем обработку по чанкам с прогрессом")
-                
-                # Используем генератор для обработки по чанкам
-                def generate_progress():
-                    try:
-                        for progress_update in service.process_upload_chunked(
-                            json_archive_path=json_archive_path,
-                            images_archive_path=images_archive_path,
-                            reload_database=reload_database,
-                            use_stubs=use_stubs,
-                            incremental=incremental_update
-                        ):
-                            # Отправляем прогресс как Server-Sent Events
-                            yield f"data: {json.dumps(progress_update, ensure_ascii=False)}\n\n"
-                            
-                            # Если обработка завершена, выходим
-                            if progress_update.get("stage") == "completed":
-                                break
-                                
-                    except Exception as e:
-                        logger.error(f"Ошибка в генераторе прогресса: {str(e)}")
-                        yield f"data: {json.dumps({'status': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
-                
-                # Возвращаем потоковый ответ с прогрессом
-                return Response(
-                    generate_progress(),
-                    mimetype='text/event-stream',
-                    headers={
-                        'Cache-Control': 'no-cache',
-                        'Connection': 'keep-alive',
-                        'X-Accel-Buffering': 'no'  # Отключаем буферизацию для nginx
-                    }
-                )
-            else:
-                # Старая обработка (для обратной совместимости)
-                logger.info("🔄 Используем старую обработку без чанков")
-                results = service.process_upload(
-                    json_archive_path=json_archive_path,
-                    images_archive_path=images_archive_path,
-                    reload_database=reload_database,
-                    use_stubs=use_stubs,
-                    incremental=incremental_update
-                )
-                
-                # Добавляем информацию о типе обновления
-                if reload_database:
-                    results["update_type"] = "полное" if not incremental_update else "инкрементальное"
-                else:
-                    results["update_type"] = "без обновления БД"
-                
-                if reload_database and results.get("database_status") == "started":
-                    response_data = {
-                        "status": "success",
-                        "message": "Ресурсы успешно обработаны. Перезагрузка базы данных запущена в фоновом режиме.",
-                        "details": "Можете следить за прогрессом в логах",
-                        "results": {
-                            "json_processed": results.get("json_processed", 0),
-                            "images_processed": results.get("images_processed", 0),
-                            "new_resources": results.get("new_resources", 0),
-                            "updated_resources": results.get("updated_resources", 0),
-                            "database_status": "started",
-                            "update_type": results.get("update_type", "неизвестно"),
-                            "use_stubs": use_stubs
-                        }
-                    }
-                else:
-                    response_data = {
-                        "status": "success",
-                        "message": "Ресурсы успешно обработаны",
-                        "results": results
-                    }
-                
-                if results.get("errors"):
-                    response_data["status"] = "partial_success"
-                    response_data["message"] = f"Обработка завершена с ошибками"
-                
-                logger.info(f"✅ Обработка завершена")
-                return jsonify(response_data)
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки загрузки: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return jsonify({
-                "status": "error",
-                "message": f"Ошибка обработки: {str(e)}"
-            }), 500
+            results = service.process_upload(
+                json_archive_path=json_archive_path,
+                images_archive_path=images_archive_path,
+                reload_database=reload_database,
+                use_stubs=use_stubs,
+                incremental=incremental_update
+            )
             
-        finally:
-            # Удаляем временную папку
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"Удалена временная папка: {temp_dir}")
-                except Exception as e:
-                    logger.error(f"Ошибка удаления временной папки: {str(e)}")
-                
-    except Exception as e:
-        logger.error(f"❌ Ошибка в /upload_resources: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "status": "error",
-            "message": f"Внутренняя ошибка сервера: {str(e)}"
-        }), 500
-@app.route("/upload_single_resource", methods=["POST"])
-@require_admin_password
-def upload_single_resource():
-    """
-    Эндпоинт для загрузки одного изображения с JSON аннотацией
-    
-    Принимает:
-    - image_file: файл изображения (jpg, jpeg, png, gif, bmp)
-    - json_data: JSON с аннотацией (строка или файл)
-    - reload_database: флаг перезагрузки реляционной базы (true/false)
-    - incremental_update: флаг инкрементального обновления (true/false)
-    - use_stubs: флаг использования заглушек для векторов (true/false)
-    - admin_password: пароль администратора (query parameter или заголовок X-Admin-Password)
-    
-    Формат JSON аннотации должен соответствовать структуре resources_dist.json:
-    {
-        "featurePhoto2": {
-            "name_photo": "путь/к/изображению.jpg",
-            "author_photo": "Автор",
-            "parent": "Название вида",
-            "location": {...},
-            "classification_info": {...},
-            "date_shooting_time": "...",
-            ...
-        }
-    }
-    """
-    try:
-        logger.info(f"📤 /upload_single_resource - получен запрос")
-        
-        # Проверяем наличие файла изображения
-        if 'image_file' not in request.files:
-            return jsonify({
-                "status": "error",
-                "message": "Необходимо загрузить файл изображения (image_file)",
-                "used_objects": [],
-                "not_used_objects": []
-            }), 400
-        
-        image_file = request.files['image_file']
-        
-        # Проверяем, что файл выбран
-        if image_file.filename == '':
-            return jsonify({
-                "status": "error",
-                "message": "Файл изображения не выбран",
-                "used_objects": [],
-                "not_used_objects": []
-            }), 400
-        
-        # Проверяем расширение файла
-        allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'}
-        file_ext = image_file.filename.rsplit('.', 1)[1].lower() if '.' in image_file.filename else ''
-        
-        if file_ext not in allowed_extensions:
-            return jsonify({
-                "status": "error",
-                "message": f"Неподдерживаемый формат файла. Допустимы: {', '.join(allowed_extensions)}",
-                "used_objects": [],
-                "not_used_objects": []
-            }), 400
-        
-        # Получаем JSON аннотацию
-        json_data = None
-        if 'json_data' in request.files:
-            # JSON передан как файл
-            json_file = request.files['json_data']
-            try:
-                json_data = json.load(json_file)
-            except json.JSONDecodeError as e:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Ошибка парсинга JSON файла: {str(e)}",
-                    "used_objects": [],
-                    "not_used_objects": []
-                }), 400
-        elif 'json_data' in request.form:
-            # JSON передан как строка
-            try:
-                json_data = json.loads(request.form['json_data'])
-            except json.JSONDecodeError as e:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Ошибка парсинга JSON строки: {str(e)}",
-                    "used_objects": [],
-                    "not_used_objects": []
-                }), 400
-        
-        if not json_data:
-            return jsonify({
-                "status": "error",
-                "message": "Необходимо предоставить JSON аннотацию (json_data)",
-                "used_objects": [],
-                "not_used_objects": []
-            }), 400
-        
-        # Получаем параметры
-        reload_database = request.form.get('reload_database', 'false').lower() == 'true'
-        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'
-        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
-        
-        # Читаем размер файла для логирования
-        image_file.seek(0, 2)  # Переходим в конец файла
-        file_size = image_file.tell()
-        image_file.seek(0)  # Возвращаемся в начало
-        
-        logger.info(f"Параметры запроса:")
-        logger.info(f"  - Имя файла: {image_file.filename}")
-        logger.info(f"  - Размер файла: {file_size} байт")
-        logger.info(f"  - Расширение файла: {file_ext}")
-        logger.info(f"  - reload_database: {reload_database}")
-        logger.info(f"  - incremental_update: {incremental_update}")
-        logger.info(f"  - use_stubs: {use_stubs}")
-        
-        # Создаем временную директорию
-        temp_dir = tempfile.mkdtemp()
-        logger.info(f"Создана временная директория: {temp_dir}")
-        
-        try:
-            # 1. Сохраняем изображение во временную директорию
-            image_filename = secure_filename(image_file.filename)
-            image_path = os.path.join(temp_dir, image_filename)
-            image_file.save(image_path)
-            
-            logger.info(f"Изображение сохранено во временную директорию: {image_path}")
-            logger.info(f"Файл существует: {os.path.exists(image_path)}")
-            logger.info(f"Размер файла: {os.path.getsize(image_path)} байт")
-            
-            # 2. Создаем временный JSON файл с аннотацией
-            json_filename = "annotation.json"
-            json_path = os.path.join(temp_dir, json_filename)
-            
-            # Создаем структуру, аналогичную ресурсам из архивов
-            annotation_data = {
-                "featurePhoto2": json_data.get("featurePhoto2", json_data)  # Поддерживаем оба формата
-            }
-            
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(annotation_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"JSON аннотация сохранена: {json_path}")
-            logger.info(f"Структура аннотации: {list(annotation_data.keys())}")
-            
-            # 3. Проверяем существование ресурсного файла
-            if not os.path.exists(RESOURCES_DIST_PATH):
-                logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
-                # Создаем файл если не существует
-                try:
-                    os.makedirs(os.path.dirname(RESOURCES_DIST_PATH), exist_ok=True)
-                    with open(RESOURCES_DIST_PATH, 'w', encoding='utf-8') as f:
-                        json.dump({"resources": []}, f, ensure_ascii=False, indent=2)
-                    logger.info(f"Создан новый файл resources_dist.json")
-                except Exception as e:
-                    logger.error(f"Не удалось создать resources_dist.json: {str(e)}")
-                    return jsonify({
-                        "status": "error",
-                        "message": f"Не удалось создать файл ресурсов: {str(e)}",
-                        "used_objects": [],
-                        "not_used_objects": []
-                    }), 500
-            
-            # 4. Создаем сервис для обработки
-            service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
-            
-            # 5. Обрабатываем как одиночный JSON файл
-            logger.info(f"Начинаем обработку JSON файла: {json_path}")
-            # ИСПРАВЛЕНИЕ: Используем process_single_json_file вместо process_json_file
-            new_resources_list, new_count, updated_count = service.process_single_json_file(json_path)
-            
-            logger.info(f"Результат обработки JSON:")
-            logger.info(f"  - Новые ресурсы: {new_count}")
-            logger.info(f"  - Обновленные ресурсы: {updated_count}")
-            logger.info(f"  - Всего в списке: {len(new_resources_list)}")
-            
-            if not new_resources_list:
-                return jsonify({
-                    "status": "error",
-                    "message": "Не удалось обработать JSON аннотацию (список ресурсов пуст)",
-                    "used_objects": [],
-                    "not_used_objects": []
-                }), 500
-            
-            # 6. Копируем изображение в папку images с созданием поддиректорий
-            saved_image_path = None
-            saved_relative_path = None
-            
-            try:
-                # Определяем путь для изображения на основе JSON данных
-                feature_data = annotation_data.get("featurePhoto2", {})
-                name_photo = feature_data.get('name_photo', image_filename)
-                
-                logger.info(f"Путь к изображению из аннотации: '{name_photo}'")
-                
-                # Извлекаем относительный путь
-                relative_path = ""
-                
-                # Убираем различные префиксы если они есть
-                prefixes_to_remove = ['data/images/', 'images/', 'static/images/', 'media/']
-                for prefix in prefixes_to_remove:
-                    if name_photo.startswith(prefix):
-                        relative_path = name_photo[len(prefix):]
-                        logger.info(f"Убран префикс '{prefix}': {relative_path}")
-                        break
-                
-                # Если не нашли префикс, используем как есть
-                if not relative_path:
-                    relative_path = name_photo
-                
-                # Заменяем пробелы на подчеркивания во всем пути
-                relative_path = relative_path.replace(' ', '_')
-                logger.info(f"Путь после замены пробелов: '{relative_path}'")
-                
-                # Получаем имя файла и путь к директории
-                filename = os.path.basename(relative_path)
-                directory_path = os.path.dirname(relative_path)
-                
-                logger.info(f"Имя файла: '{filename}'")
-                logger.info(f"Путь к директории: '{directory_path}'")
-                
-                # Создаем полный путь к целевой директории
-                target_dir = os.path.join(IMAGES_DIR, directory_path)
-                logger.info(f"Полный путь к целевой директории: {target_dir}")
-                
-                # Создаем все необходимые поддиректории (если их нет)
-                os.makedirs(target_dir, exist_ok=True)
-                logger.info(f"✅ Создана/проверена директория: {target_dir}")
-                
-                # Проверяем, что директория создана
-                if not os.path.exists(target_dir):
-                    logger.error(f"❌ Директория не была создана: {target_dir}")
-                    raise FileNotFoundError(f"Не удалось создать директорию: {target_dir}")
-                
-                # Полный путь к целевому файлу
-                target_path = os.path.join(target_dir, filename)
-                logger.info(f"Полный путь к целевому файлу: {target_path}")
-                
-                # Копируем изображение
-                shutil.copy2(image_path, target_path)
-                logger.info(f"✅ Изображение успешно скопировано")
-                
-                # Для отладки проверим существование файла
-                if os.path.exists(target_path):
-                    file_size_kb = os.path.getsize(target_path) / 1024
-                    logger.info(f"✅ Файл подтвержден: {target_path}")
-                    logger.info(f"✅ Размер файла: {file_size_kb:.2f} KB")
-                else:
-                    logger.error(f"❌ Файл не найден после копирования: {target_path}")
-                    raise FileNotFoundError(f"Файл не был скопирован: {target_path}")
-                
-                # Сохраняем информацию о пути для ответа
-                saved_image_path = target_path
-                saved_relative_path = os.path.join(directory_path, filename) if directory_path else filename
-                logger.info(f"✅ Сохраненный относительный путь: {saved_relative_path}")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка копирования изображения: {str(e)}", exc_info=True)
-                return jsonify({
-                    "status": "partial_success",
-                    "message": f"Аннотация обработана, но не удалось сохранить изображение: {str(e)}",
-                    "results": {
-                        "json_processed": 1,
-                        "images_processed": 0,
-                        "new_resources": new_count,
-                        "updated_resources": updated_count,
-                        "database_reloaded": False
-                    },
-                    "used_objects": [{"name": image_filename, "type": "image", "operation": "upload"}],
-                    "not_used_objects": []
-                }), 200
-            
-            # 7. Перезагружаем базу данных если запрошено
-            database_reloaded = False
             if reload_database:
-                logger.info(f"🚀 Запрошена перезагрузка БД")
-                
-                # Создаем временный файл только с новыми ресурсами
-                temp_json_file = os.path.join(temp_dir, "new_resources.json")
-                with open(temp_json_file, 'w', encoding='utf-8') as f:
-                    json.dump({"resources": new_resources_list}, f, ensure_ascii=False, indent=2)
-                
-                logger.info(f"📄 Создан временный файл с {len(new_resources_list)} ресурсами: {temp_json_file}")
-                
-                database_reloaded = service.reload_relational_database(
-                    reload_database=reload_database,
-                    use_stubs=use_stubs,
-                    incremental=incremental_update,
-                    new_resources_file=temp_json_file
-                )
-                
-                logger.info(f"Результат перезагрузки БД: {database_reloaded}")
-            
-            # 8. Формируем ответ
-            results = {
-                "json_processed": 1,
-                "images_processed": 1,
-                "new_resources": new_count,
-                "updated_resources": updated_count,
-                "database_reloaded": database_reloaded,
-                "update_type": "полное" if not incremental_update else "инкрементальное" if database_reloaded else "без обновления БД",
-                "image_saved_path": saved_relative_path,  # Добавляем путь к сохраненному изображению
-                "image_full_path": saved_image_path if saved_image_path else None,
-                "image_url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
-            }
+                results["update_type"] = "полное" if not incremental_update else "инкрементальное"
+            else:
+                results["update_type"] = "без обновления БД"
             
             response_data = {
                 "status": "success",
-                "message": f"Ресурс успешно обработан и добавлен. Изображение сохранено в: {saved_relative_path}",
+                "message": "Ресурсы успешно обработаны",
                 "results": results,
                 "used_objects": [
-                    {
-                        "name": image_filename,
-                        "type": "image",
-                        "operation": "upload",
-                        "saved_path": saved_relative_path,
-                        "url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
-                    },
                     {
                         "name": "resources_dist.json",
                         "type": "configuration",
@@ -772,30 +336,15 @@ def upload_single_resource():
                 "not_used_objects": []
             }
             
-            # Информация о новом ресурсе
-            if new_resources_list:
-                resource_info = new_resources_list[0].get('identificator', {})
-                resource_id = resource_info.get('id', 'unknown')
-                resource_name = resource_info.get('name', {})
-                common_name = resource_name.get('common', 'unknown') if isinstance(resource_name, dict) else 'unknown'
-                
-                response_data["resource_info"] = {
-                    "id": resource_id,
-                    "name": common_name,
-                    "image_path": saved_relative_path,
-                    "image_url": f"https://testecobot.ru/images/{saved_relative_path}" if saved_relative_path else None
-                }
+            if results.get("errors"):
+                response_data["status"] = "partial_success"
+                response_data["message"] = f"Обработка завершена с ошибками"
             
-            logger.info(f"✅ Обработка завершена успешно")
-            logger.info(f"  - Сохраненное изображение: {saved_relative_path}")
-            logger.info(f"  - Новых ресурсов: {new_count}")
-            logger.info(f"  - Обновленных ресурсов: {updated_count}")
-            logger.info(f"  - БД перезагружена: {database_reloaded}")
-            
+            logger.info(f"✅ Обработка завершена: {results}")
             return jsonify(response_data)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка обработки ресурса: {str(e)}", exc_info=True)
+            logger.error(f"❌ Ошибка обработки загрузки: {str(e)}")
             import traceback
             traceback.print_exc()
             return jsonify({
@@ -806,16 +355,15 @@ def upload_single_resource():
             }), 500
             
         finally:
-            # Удаляем временную директорию
             if os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)
                     logger.info(f"Удалена временная папка: {temp_dir}")
                 except Exception as e:
                     logger.error(f"Ошибка удаления временной папки: {str(e)}")
-                    
+                
     except Exception as e:
-        logger.error(f"❌ Ошибка в /upload_single_resource: {str(e)}")
+        logger.error(f"❌ Ошибка в /upload_resources: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({
@@ -2353,40 +1901,6 @@ def search_images_by_features():
             
             # Добавляем debug информацию
             if debug_mode:
-                # Функция для обрезки URL для отображения в Telegram
-                def truncate_url_for_telegram(url):
-                    """Обрезает URL, убирая протокол и домен для отображения в Telegram"""
-                    if not url:
-                        return ""
-                    # Убираем протоколы http://, https://
-                    url = url.replace('http://', '').replace('https://', '')
-                    # Убираем домен до первого слэша
-                    parts = url.split('/', 1)
-                    if len(parts) > 1:
-                        return parts[1]  # Возвращаем путь без домена
-                    return url
-                
-                # Собираем информацию о найденных изображениях
-                found_images_info = []
-                if result.get("status") == "success" and result.get("images"):
-                    for idx, image in enumerate(result["images"]):
-                        image_info = {
-                            "index": idx + 1,
-                            "title": image.get("title", "Без названия"),
-                            "species": image.get("species_name", "Не указан"),
-                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
-                        }
-                        
-                        # Добавляем информацию о признаках, если они есть
-                        features = image.get("features", {})
-                        if features:
-                            image_info["features"] = {}
-                            for key, value in features.items():
-                                if value and str(value).strip():  # Добавляем только непустые значения
-                                    image_info["features"][key] = value
-                        
-                        found_images_info.append(image_info)
-                
                 debug_info["search_type"] = "with_species"
                 debug_info["synonyms_used"] = result.get("synonyms_used", {})
                 debug_info["database_query"] = {
@@ -2394,31 +1908,10 @@ def search_images_by_features():
                     "feature_conditions": list(features.keys())
                 }
                 debug_info["stoplist_filter"] = {
-                    "total_before_filter": len(result.get("images", [])) + len(stoplisted_images),
+                    "total_before_filter": len(result.get("images", [])),
                     "safe_after_filter": len(safe_images),
                     "stoplisted_count": len(stoplisted_images)
                 }
-                debug_info["found_images"] = {
-                    "count": len(found_images_info),
-                    "images": found_images_info
-                }
-                logger.info('Найденные изображения')
-                logger.info(debug_info["found_images"])
-                # Добавляем также информацию об исключенных изображениях (опционально)
-                if stoplisted_images:
-                    stoplisted_info = []
-                    for idx, image in enumerate(stoplisted_images):
-                        stoplisted_info.append({
-                            "index": idx + 1,
-                            "title": image.get("title", "Без названия"),
-                            "in_stoplist": image.get("features", {}).get("in_stoplist"),
-                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
-                        })
-                    debug_info["stoplisted_images"] = {
-                        "count": len(stoplisted_info),
-                        "images": stoplisted_info
-                    }
-                
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
@@ -2491,70 +1984,15 @@ def search_images_by_features():
             
             # Добавляем debug информацию
             if debug_mode:
-                # Функция для обрезки URL для отображения в Telegram
-                def truncate_url_for_telegram(url):
-                    """Обрезает URL, убирая протокол и домен для отображения в Telegram"""
-                    if not url:
-                        return ""
-                    # Убираем протоколы http://, https://
-                    url = url.replace('http://', '').replace('https://', '')
-                    # Убираем домен до первого слэша
-                    parts = url.split('/', 1)
-                    if len(parts) > 1:
-                        return parts[1]  # Возвращаем путь без домена
-                    return url
-                
-                # Собираем информацию о найденных изображениях
-                found_images_info = []
-                if result.get("status") == "success" and result.get("images"):
-                    for idx, image in enumerate(result["images"]):
-                        image_info = {
-                            "index": idx + 1,
-                            "title": image.get("title", "Без названия"),
-                            "species": image.get("species_name", "Не указан"),
-                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
-                        }
-                        
-                        # Добавляем информацию о признаках, если они есть
-                        img_features = image.get("features", {})
-                        if img_features:
-                            image_info["features"] = {}
-                            for key, value in img_features.items():
-                                if value and str(value).strip():  # Добавляем только непустые значения
-                                    image_info["features"][key] = value
-                        
-                        found_images_info.append(image_info)
-                
                 debug_info["search_type"] = "features_only"
                 debug_info["database_query"] = {
                     "feature_conditions": list(features.keys())
                 }
                 debug_info["stoplist_filter"] = {
-                    "total_before_filter": len(result.get("images", [])) + len(stoplisted_images),
+                    "total_before_filter": len(result.get("images", [])),
                     "safe_after_filter": len(safe_images),
                     "stoplisted_count": len(stoplisted_images)
                 }
-                debug_info["found_images"] = {
-                    "count": len(found_images_info),
-                    "images": found_images_info
-                }
-                logger.info('Найденные изображения')
-                logger.info(debug_info["found_images"])
-                # Добавляем также информацию об исключенных изображениях (опционально)
-                if stoplisted_images:
-                    stoplisted_info = []
-                    for idx, image in enumerate(stoplisted_images):
-                        stoplisted_info.append({
-                            "index": idx + 1,
-                            "title": image.get("title", "Без названия"),
-                            "in_stoplist": image.get("features", {}).get("in_stoplist"),
-                            "truncated_path": truncate_url_for_telegram(image.get("image_path", ""))
-                        })
-                    debug_info["stoplisted_images"] = {
-                        "count": len(stoplisted_info),
-                        "images": stoplisted_info
-                    }
-                
                 result["debug"] = debug_info
                 
             if result.get("status") == "not_found":
@@ -2576,7 +2014,7 @@ def search_images_by_features():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-     
+    
 @app.route("/object/description/", methods=["GET", "POST"])
 def get_object_description():
     # Обработка GET параметров
@@ -2585,6 +2023,7 @@ def get_object_description():
     
     object_name = request.args.get("object_name")
     query = request.args.get("query")
+    clean_query = request.args.get("clean_query", query)  # Новый параметр: по умолчанию используем query
     limit = int(request.args.get("limit", 1500))
     similarity_threshold = float(request.args.get("similarity_threshold", 0.35))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
@@ -2594,6 +2033,11 @@ def get_object_description():
     object_type = request.args.get("object_type", "all")
     save_prompt = request.args.get("save_prompt", "false").lower() == "true"
     in_stoplist = request.args.get("in_stoplist", "1")
+    
+    # НОВЫЕ ПАРАМЕТРЫ ДЛЯ FAISS
+    force_vector_search = request.args.get("force_vector_search", "false").lower() == "true"
+    vector_similarity_threshold = float(request.args.get("vector_similarity_threshold", "0.03"))
+    use_vector_fallback = request.args.get("use_vector_fallback", "true").lower() == "true"
 
     # Обработка POST body
     filter_data = None
@@ -2607,6 +2051,7 @@ def get_object_description():
             "object_name": object_name,
             "object_type": object_type,
             "query": query,
+            "clean_query": clean_query,  # Добавлено в debug
             "limit": limit,
             "similarity_threshold": similarity_threshold,
             "include_similarity": include_similarity,
@@ -2614,7 +2059,11 @@ def get_object_description():
             "use_gigachat_answer": use_gigachat_answer,
             "filter_data": filter_data,
             "save_prompt": save_prompt,
-            "in_stoplist": in_stoplist
+            "in_stoplist": in_stoplist,
+            # НОВЫЕ ПАРАМЕТРЫ
+            "force_vector_search": force_vector_search,
+            "vector_similarity_threshold": vector_similarity_threshold,
+            "use_vector_fallback": use_vector_fallback
         },
         "timestamp": time.time(),
         "steps": []
@@ -2676,6 +2125,19 @@ def get_object_description():
                     return str(external_id)
         
         return None
+
+    # НОВАЯ ФУНКЦИЯ: Извлечение всех external_id из списка описаний
+    def extract_all_external_ids(descriptions):
+        """Извлекает все external_id из списка описаний"""
+        external_ids = []
+        
+        for desc in descriptions:
+            if isinstance(desc, dict):
+                external_id = extract_external_id(desc)
+                if external_id and external_id not in external_ids:
+                    external_ids.append(external_id)
+        
+        return external_ids
 
     # НОВАЯ ФУНКЦИЯ: Правильное формирование заголовка
     def get_proper_title(desc, fallback_name=None, index=1):
@@ -2740,70 +2202,163 @@ def get_object_description():
         search_limit = limit if limit > 0 else 1500
         context_limit = 6
         
-        if filter_data:
-            descriptions = search_service.get_object_descriptions_by_filters(
-                filter_data=filter_data,
-                object_type=object_type,
-                limit=search_limit,
-                in_stoplist=in_stoplist,
-                object_name=object_name  # Передаем разрешенное название для точного поиска
-            )
-            search_method = "filter_search"
-            
+        # ПРОВЕРЯЕМ УСЛОВИЯ ДЛЯ FAISS FALLBACK
+        use_faiss_fallback = False
+        faiss_results = []
+        
+        # Определяем запрос для векторного поиска (используем clean_query если передан)
+        search_query = None
+        if clean_query:  # ИСПРАВЛЕНИЕ: Используем clean_query в первую очередь для FAISS
+            search_query = clean_query
         elif query:
-            embedding = search_service.embedding_model.embed_query(query)
+            search_query = query
+        elif object_name:
+            search_query = object_name
+        elif filter_data:
+            search_query = json.dumps(filter_data, ensure_ascii=False)
+        
+        # Проверяем, нужно ли сразу использовать FAISS (force_vector_search)
+        if force_vector_search and search_query and use_gigachat_answer:
+            logger.info(f"🚀 Активирован принудительный FAISS поиск для запроса: {search_query}")
             
-            if not isinstance(embedding, list):
-                logger.error(f"Embedding должен быть списком, получен: {type(embedding)}")
-                return jsonify({"error": "Internal embedding error"}), 500
-                
-            if not all(isinstance(x, (int, float)) for x in embedding):
-                logger.error("Embedding содержит нечисловые элементы")
-                return jsonify({"error": "Internal embedding error"}), 500
-                
-            if object_name:
-                descriptions = search_service.get_object_descriptions_with_embedding(
-                    object_name=object_name,
-                    object_type=object_type,
-                    query_embedding=embedding,
-                    limit=search_limit,
-                    similarity_threshold=similarity_threshold,
-                    in_stoplist=in_stoplist
-                )
-                search_method = "object_with_embedding"
-            else:
-                descriptions = search_service.search_objects_by_embedding(
-                    query_embedding=embedding,
-                    object_type=object_type,
-                    limit=search_limit,
-                    similarity_threshold=similarity_threshold,
-                    in_stoplist=in_stoplist
-                )
-                search_method = "semantic_search"
-                
-        else:
-            descriptions_text = search_service.get_object_descriptions(
-                object_name, 
-                object_type,
-                in_stoplist=in_stoplist
+            # Выполняем векторный поиск
+            faiss_results = search_service.vector_search_fallback(
+                query=search_query,  # Используем search_query (clean_query или query)
+                object_type=object_type,
+                similarity_threshold=vector_similarity_threshold,
+                limit=search_limit
             )
             
-            if include_similarity:
-                descriptions = [{"content": text, "similarity": None, "source": "content"} 
-                              for text in descriptions_text]
+            if faiss_results:
+                use_faiss_fallback = True
+                descriptions = faiss_results
+                logger.info(f"✅ FAISS поиск нашел {len(faiss_results)} документов")
+                
+                debug_info["faiss_search"] = {
+                    "activated": True,
+                    "reason": "force_vector_search",
+                    "query_used": search_query,
+                    "clean_query_used": clean_query is not None,  # Отмечаем, что использовался clean_query
+                    "results_found": len(faiss_results),
+                    "similarity_threshold": vector_similarity_threshold,
+                    "search_source": "faiss_vector_store"
+                }
             else:
-                descriptions = [{"content": text, "source": "content"} 
-                              for text in descriptions_text]
-            search_method = "simple_search"
+                logger.info("❌ FAISS поиск не нашел документов")
+                descriptions = []
+                debug_info["faiss_search"] = {
+                    "activated": True,
+                    "reason": "force_vector_search",
+                    "query_used": search_query,
+                    "clean_query_used": clean_query is not None,
+                    "results_found": 0,
+                    "search_source": "faiss_vector_store"
+                }
+        else:
+            # Обычный поиск через реляционную базу
+            if filter_data:
+                descriptions = search_service.get_object_descriptions_by_filters(
+                    filter_data=filter_data,
+                    object_type=object_type,
+                    limit=search_limit,
+                    in_stoplist=in_stoplist,
+                    object_name=object_name  # Передаем разрешенное название для точного поиска
+                )
+                search_method = "filter_search"
+                
+            elif query:
+                # Используем clean_query для создания эмбеддинга если он передан
+                query_for_embedding = clean_query if clean_query else query
+                embedding = search_service.embedding_model.embed_query(query_for_embedding)
+                
+                if not isinstance(embedding, list):
+                    logger.error(f"Embedding должен быть списком, получен: {type(embedding)}")
+                    return jsonify({"error": "Internal embedding error"}), 500
+                    
+                if not all(isinstance(x, (int, float)) for x in embedding):
+                    logger.error("Embedding содержит нечисловые элементы")
+                    return jsonify({"error": "Internal embedding error"}), 500
+                    
+                if object_name:
+                    descriptions = search_service.get_object_descriptions_with_embedding(
+                        object_name=object_name,
+                        object_type=object_type,
+                        query_embedding=embedding,
+                        limit=search_limit,
+                        similarity_threshold=similarity_threshold,
+                        in_stoplist=in_stoplist
+                    )
+                    search_method = "object_with_embedding"
+                else:
+                    descriptions = search_service.search_objects_by_embedding(
+                        query_embedding=embedding,
+                        object_type=object_type,
+                        limit=search_limit,
+                        similarity_threshold=similarity_threshold,
+                        in_stoplist=in_stoplist
+                    )
+                    search_method = "semantic_search"
+                    
+            else:
+                descriptions_text = search_service.get_object_descriptions(
+                    object_name, 
+                    object_type,
+                    in_stoplist=in_stoplist
+                )
+                
+                if include_similarity:
+                    descriptions = [{"content": text, "similarity": None, "source": "content"} 
+                                  for text in descriptions_text]
+                else:
+                    descriptions = [{"content": text, "source": "content"} 
+                                  for text in descriptions_text]
+                search_method = "simple_search"
 
-        # Debug информация о результатах поиска
-        if debug_mode:
-            debug_info["search_method"] = search_method
-            debug_info["search_results"] = {
-                "total_found": len(descriptions),
-                "search_limit": search_limit,
-                "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions and search_method != "simple_search" else []
-            }
+            # Debug информация о результатах поиска
+            if debug_mode:
+                debug_info["search_method"] = search_method
+                debug_info["search_results"] = {
+                    "total_found": len(descriptions),
+                    "search_limit": search_limit,
+                    "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions and search_method != "simple_search" else []
+                }
+            
+            # ПРОВЕРЯЕМ НАДО ЛИ ИСПОЛЬЗОВАТЬ FAISS FALLBACK
+            if use_gigachat_answer and use_vector_fallback and not descriptions and search_query:
+                logger.info(f"🔄 Активирован FAISS fallback (нет результатов в реляционной базе): {search_query}")
+                
+                # Выполняем векторный поиск как fallback
+                faiss_results = search_service.vector_search_fallback(
+                    query=search_query,
+                    object_type=object_type,
+                    similarity_threshold=vector_similarity_threshold,
+                    limit=search_limit
+                )
+                
+                if faiss_results:
+                    use_faiss_fallback = True
+                    descriptions = faiss_results
+                    logger.info(f"✅ FAISS fallback нашел {len(faiss_results)} документов")
+                    
+                    debug_info["faiss_fallback"] = {
+                        "activated": True,
+                        "reason": "no_relational_results",
+                        "query_used": search_query,
+                        "clean_query_used": clean_query is not None,
+                        "results_found": len(faiss_results),
+                        "similarity_threshold": vector_similarity_threshold,
+                        "search_source": "faiss_vector_store"
+                    }
+                else:
+                    logger.info("❌ FAISS fallback не нашел документов")
+                    debug_info["faiss_fallback"] = {
+                        "activated": True,
+                        "reason": "no_relational_results",
+                        "query_used": search_query,
+                        "clean_query_used": clean_query is not None,
+                        "results_found": 0,
+                        "search_source": "faiss_vector_store"
+                    }
 
         # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
         safe_descriptions = []
@@ -2811,8 +2366,16 @@ def get_object_description():
 
         for desc in descriptions:
             if isinstance(desc, dict):
-                feature_data = desc.get("feature_data", {})
-                desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
+                # Для FAISS результатов feature_data может быть словарем
+                if use_faiss_fallback:
+                    feature_data = desc.get('feature_data', {})
+                    if isinstance(feature_data, dict):
+                        desc_in_stoplist = feature_data.get('in_stoplist')
+                    else:
+                        desc_in_stoplist = desc.get('in_stoplist')
+                else:
+                    feature_data = desc.get("feature_data", {})
+                    desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
                 
                 try:
                     requested_level = int(in_stoplist)
@@ -2867,6 +2430,7 @@ def get_object_description():
 
         # Обработка use_gigachat_filter
         if use_gigachat_filter:
+            # Для фильтрации Gigachat используем оригинальный query
             filter_query = query if query else object_name
             
             if debug_mode:
@@ -2954,7 +2518,8 @@ def get_object_description():
                         "name": desc.get("object_name", object_name if object_name else "semantic_search"),
                         "type": desc.get("object_type", object_type),
                         "source": desc.get("source", "unknown"),
-                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None,
+                        "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     }
                     used_objects.append(obj_info)
             
@@ -2966,7 +2531,8 @@ def get_object_description():
                         "name": desc.get("object_name", object_name if object_name else "semantic_search"),
                         "type": desc.get("object_type", object_type),
                         "source": desc.get("source", "unknown"),
-                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                        "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None,
+                        "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     }
                     not_used_objects.append(obj_info)
             
@@ -2983,10 +2549,17 @@ def get_object_description():
                 count_info += f" (исключено {len(blacklisted_descriptions)} записей с риском blacklist)"
             if total_count > context_limit:
                 count_info += f" (в контекст включено топ-{context_limit} по релевантности)"
-            logger.debug(context)
+            
+            # Добавляем информацию о источнике поиска
+            if use_faiss_fallback:
+                count_info += f"\nПоиск выполнен в FAISS векторной базе (порог схожести: {vector_similarity_threshold})"
+                if clean_query:
+                    count_info += f"\nИспользован очищенный запрос для поиска: '{clean_query}'"
+            
+            logger.debug(f"Контекст для GigaChat: {len(context)} символов")
             context += count_info
             
-            # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА
+            # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА (используем оригинальный query для GigaChat)
             full_prompt = f"""Ты эксперт по Байкальской природной территории. 
             Используй твою базу знаний для точных ответов на вопросы пользователя.
 
@@ -2999,7 +2572,7 @@ def get_object_description():
             Твоя база знаний:
             {context}
 
-            Вопрос: {query}
+            Вопрос: {query}  # Используем оригинальный query для GigaChat!
 
             Ответ:"""
             
@@ -3017,7 +2590,7 @@ def get_object_description():
             
             # Генерируем ответ с помощью GigaChat
             try:
-                gigachat_result = search_service._generate_gigachat_answer(query, context)
+                gigachat_result = search_service._generate_gigachat_answer(query, context)  # Используем оригинальный query
                 
                 # Проверяем, был ли ответ заблокирован
                 is_blacklist = gigachat_result.get("finish_reason") == "blacklist" or not gigachat_result.get("success", True)
@@ -3025,6 +2598,9 @@ def get_object_description():
                 # Если ответ заблокирован, возвращаем форматированные безопасные описания
                 if is_blacklist:
                     logger.info("🚫 GigaChat вернул blacklist, возвращаем форматированные безопасные описания")
+                    
+                    # ИЗВЛЕКАЕМ ВСЕ external_id из безопасных описаний
+                    external_ids = extract_all_external_ids(descriptions_for_context)
                     
                     # Форматируем безопасные описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
                     formatted_descriptions = []
@@ -3072,7 +2648,10 @@ def get_object_description():
                     response_data = {
                         "count": len(formatted_descriptions),
                         "descriptions": formatted_descriptions,
+                        "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
+                        "external_ids": external_ids,  # Дублируем для обратной совместимости
                         "query_used": query if query else "simple_search",
+                        "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
                         "similarity_threshold": similarity_threshold if query else None,
                         "use_gigachat_filter": use_gigachat_filter,
                         "use_gigachat_answer": True,
@@ -3101,13 +2680,22 @@ def get_object_description():
                             "original_type": resolved_object_info.get("original_type", object_type)
                         }
 
+                    # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
+                    if use_faiss_fallback:
+                        response_data["search_source"] = "faiss_vector_store"
+                        response_data["vector_similarity_threshold"] = vector_similarity_threshold
+                        response_data["faiss_fallback_used"] = True
+                        response_data["faiss_search_query"] = search_query
+                        response_data["clean_query_for_faiss"] = clean_query if clean_query else None
+
                     if debug_mode:
                         response_data["debug"] = debug_info
                         response_data["debug"]["gigachat_generation"] = {
                             "finish_reason": gigachat_result.get("finish_reason"),
                             "blacklist_detected": True,
                             "fallback_to_descriptions": True,
-                            "prompt_saved": save_prompt
+                            "prompt_saved": save_prompt,
+                            "external_ids_found": len(external_ids)
                         }
 
                     return jsonify(response_data)
@@ -3115,8 +2703,9 @@ def get_object_description():
                 # Если ответ не заблокирован, возвращаем обычный ответ GigaChat
                 gigachat_response = gigachat_result.get("content", "")
 
-                # СОБИРАЕМ EXTERNAL_ID ИЗ КОНТЕКСТНЫХ ОПИСАНИЙ
-                external_ids = []
+                # ИЗВЛЕКАЕМ ВСЕ external_id из контекстных описаний
+                external_ids = extract_all_external_ids(context_descriptions)
+                
                 source_descriptions_summary = []
 
                 for desc in context_descriptions:
@@ -3136,14 +2725,13 @@ def get_object_description():
                         
                         if external_id:
                             desc_summary["external_id"] = external_id
-                            if external_id not in external_ids:
-                                external_ids.append(external_id)
                                 
                         source_descriptions_summary.append(desc_summary)
 
                 response_data = {
                     "gigachat_answer": gigachat_response,
-                    "external_ids": external_ids,  # СПИСОК ВСЕХ EXTERNAL_ID
+                    "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
+                    "external_ids": external_ids,  # Дублируем для обратной совместимости
                     "source_descriptions": source_descriptions_summary,  # КРАТКАЯ ИНФОРМАЦИЯ ОБ ИСТОЧНИКАХ
                     "context_used": {
                         "descriptions_count": len(context_descriptions),
@@ -3151,7 +2739,8 @@ def get_object_description():
                         "blacklisted_excluded": len(blacklisted_descriptions),
                         "external_ids_count": len(external_ids)
                     },
-                    "query": query,
+                    "query": query,  # Оригинальный query
+                    "clean_query": clean_query if clean_query else None,  # Очищенный query если был передан
                     "object_name": object_name if object_name else "semantic_search",
                     "object_type": object_type,
                     "in_stoplist_level": in_stoplist,
@@ -3168,14 +2757,34 @@ def get_object_description():
                         "original_type": resolved_object_info.get("original_type", object_type)
                     }
                 
+                # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
+                if use_faiss_fallback:
+                    response_data["search_source"] = "faiss_vector_store"
+                    response_data["vector_similarity_threshold"] = vector_similarity_threshold
+                    response_data["faiss_fallback_used"] = True
+                    response_data["faiss_search_query"] = search_query
+                    response_data["clean_query_for_faiss"] = clean_query if clean_query else None
+                
                 if debug_mode:
                     response_data["debug"] = debug_info
                     response_data["debug"]["gigachat_generation"] = {
                         "response_length": len(gigachat_response),
                         "finish_reason": gigachat_result.get("finish_reason"),
                         "blacklist_detected": False,
-                        "prompt_saved": save_prompt
+                        "prompt_saved": save_prompt,
+                        "external_ids_found": len(external_ids)
                     }
+                def convert_floats(obj):
+                    if isinstance(obj, dict):
+                        return {k: convert_floats(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [convert_floats(item) for item in obj]
+                    elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
+                        return float(obj)
+                    return obj
+
+                # Преобразуем response_data перед возвратом
+                response_data = convert_floats(response_data)
 
                 return jsonify(response_data)
                 
@@ -3201,7 +2810,8 @@ def get_object_description():
                     "name": desc.get("object_name", object_name if object_name else "semantic_search"),
                     "type": desc.get("object_type", object_type),
                     "source": desc.get("source", "unknown"),
-                    "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
+                    "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None,
+                    "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                 }
                 used_objects.append(obj_info)
 
@@ -3212,6 +2822,9 @@ def get_object_description():
                 response["debug"] = debug_info
             return jsonify(response), 404
 
+        # ИЗВЛЕКАЕМ ВСЕ external_id из всех описаний
+        external_ids = extract_all_external_ids(descriptions)
+        
         # Форматируем описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
         formatted_descriptions = []
         for i, desc in enumerate(descriptions, 1):
@@ -3258,7 +2871,10 @@ def get_object_description():
         response_data = {
             "count": len(formatted_descriptions),
             "descriptions": formatted_descriptions,
+            "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
+            "external_ids": external_ids,  # Дублируем для обратной совместимости
             "query_used": query if query else "simple_search",
+            "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
             "similarity_threshold": similarity_threshold if query else None,
             "use_gigachat_filter": use_gigachat_filter,
             "in_stoplist_filter_applied": True,
@@ -3286,9 +2902,21 @@ def get_object_description():
                 "original_type": resolved_object_info.get("original_type", object_type)
             }
 
+        # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
+        if use_faiss_fallback:
+            response_data["search_source"] = "faiss_vector_store"
+            response_data["vector_similarity_threshold"] = vector_similarity_threshold
+            response_data["faiss_fallback_used"] = True
+            response_data["faiss_search_query"] = search_query
+            response_data["clean_query_for_faiss"] = clean_query if clean_query else None
+
         # Добавляем debug информацию
         if debug_mode:
             response_data["debug"] = debug_info
+            response_data["debug"]["external_ids_extracted"] = {
+                "count": len(external_ids),
+                "ids": external_ids
+            }
 
         return jsonify(response_data)
         
@@ -3299,7 +2927,8 @@ def get_object_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-       
+    
+          
 @app.route("/species/description/", methods=["GET"])
 def get_species_description():
     logger.info(f"📦 /species/description - GET params: {dict(request.args)}")
@@ -4114,6 +3743,225 @@ def find_species_with_description():
     
     return jsonify(result)
 
+@app.route("/test_faiss_search", methods=["GET"])
+def test_faiss_search():
+    """
+    Тестовый эндпоинт для проверки FAISS векторного поиска
+    GET параметры:
+    - query: поисковый запрос
+    - k: количество результатов (по умолчанию 10)
+    - similarity_threshold: порог схожести (0.0-1.0, по умолчанию 0.8)
+    - include_full_docs: возвращать полные документы (true/false, по умолчанию false)
+    - debug: детальная отладка (true/false, по умолчанию false)
+    """
+    try:
+        query = request.args.get("query", "")
+        k = int(request.args.get("k", 10))
+        similarity_threshold = float(request.args.get("similarity_threshold", 0.8))
+        include_full_docs = request.args.get("include_full_docs", "false").lower() == "true"
+        debug = request.args.get("debug", "false").lower() == "true"
+        
+        if not query:
+            return jsonify({
+                "status": "error",
+                "message": "Параметр 'query' обязателен",
+                "example": "/test_faiss_search?query=Байкал&k=5&similarity_threshold=0.7"
+            }), 400
+        
+        logger.info(f"🔍 Тестовый FAISS поиск: '{query}' (k={k}, threshold={similarity_threshold})")
+        
+        # Загружаем FAISS индекс если еще не загружен
+        search_service.load_faiss_index()
+        
+        if not search_service.faiss_vectorstore:
+            return jsonify({
+                "status": "error",
+                "message": "FAISS индекс не загружен",
+                "details": f"Проверьте путь: {search_service.faiss_index_path}"
+            }), 500
+        
+        # Проверяем размер индекса
+        index_size = search_service.faiss_vectorstore.index.ntotal
+        logger.info(f"📊 Размер FAISS индекса: {index_size} векторов")
+        
+        # Выполняем поиск в FAISS
+        results = search_service.faiss_vectorstore.similarity_search_with_score(query, k=k*2)
+        
+        # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Выводим информацию о первых 5 результатах
+        logger.info(f"📋 RAW FAISS результаты ({len(results)}):")
+        for i, (doc, score) in enumerate(results[:5]):  # Ограничиваем 5 результатами
+            # Преобразуем float32 к float
+            score_float = float(score)
+            similarity_float = 1 - score_float
+            
+            logger.info(f"  {i+1}. Score: {score_float:.4f}, Similarity: {similarity_float:.4f}")
+            logger.info(f"     Name: {doc.metadata.get('common_name', 'N/A')}")
+            logger.info(f"     Type: {doc.metadata.get('resource_type', 'N/A')}")
+            logger.info(f"     Resource ID: {doc.metadata.get('resource_id', 'N/A')}")
+            logger.info(f"     Chunk {doc.metadata.get('chunk_index', 0)} of {doc.metadata.get('total_chunks', 1)}")
+            logger.info(f"     Фрагмент (первые 200 символов): {doc.page_content[:200]}...")
+            
+            # Показываем полный текст чанка для debug
+            if debug:
+                logger.info(f"     Полный текст чанка: {doc.page_content}")
+        
+        # ФИКС: Преобразуем все numpy.float32 в обычные float
+        def convert_floats(obj):
+            if isinstance(obj, dict):
+                return {k: convert_floats(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_floats(item) for item in obj]
+            elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
+                return float(obj)
+            return obj
+        
+        # Фильтруем по порогу схожести
+        filtered_results = []
+        for doc, score in results:
+            # Преобразуем float32 к float
+            score_float = float(score)
+            similarity = 1 - score_float  # Преобразуем расстояние в схожесть
+            
+            if similarity >= similarity_threshold:
+                # Извлекаем полный документ если нужно
+                if include_full_docs:
+                    resource_id = doc.metadata.get('resource_id')
+                    full_document = search_service._get_full_document(resource_id, doc.page_content)
+                    content = full_document
+                else:
+                    content = doc.page_content
+                
+                result = {
+                    'content': content[:500] + "..." if len(content) > 500 else content,
+                    'similarity': similarity,
+                    'score': score_float,
+                    'metadata': {
+                        'resource_id': doc.metadata.get('resource_id', 'unknown'),
+                        'resource_type': doc.metadata.get('resource_type', 'unknown'),
+                        'common_name': doc.metadata.get('common_name', ''),
+                        'scientific_name': doc.metadata.get('scientific_name', ''),
+                        'source': doc.metadata.get('source', ''),
+                        'chunk_index': doc.metadata.get('chunk_index', 0),
+                        'total_chunks': doc.metadata.get('total_chunks', 1)
+                    }
+                }
+                
+                # Добавляем полные метаданные только в debug режиме
+                if debug:
+                    # Преобразуем все float32 в метаданных
+                    safe_metadata = {}
+                    for key, value in doc.metadata.items():
+                        if hasattr(value, 'dtype') and 'float32' in str(value.dtype):
+                            safe_metadata[key] = float(value)
+                        else:
+                            safe_metadata[key] = value
+                    result['full_metadata'] = safe_metadata
+                
+                # Преобразуем все float32 в результате
+                result = convert_floats(result)
+                filtered_results.append(result)
+        
+        # Сортируем по схожести (по убыванию)
+        filtered_results.sort(key=lambda x: x['similarity'], reverse=True)
+        filtered_results = filtered_results[:k]  # Применяем лимит
+        
+        # Подготавливаем статистику
+        stats = {
+            "total_index_size": index_size,
+            "query": query,
+            "parameters": {
+                "k_requested": k,
+                "similarity_threshold": similarity_threshold,
+                "include_full_docs": include_full_docs
+            },
+            "search_results": {
+                "raw_results": len(results),
+                "filtered_results": len(filtered_results),
+                "threshold_passed": len(filtered_results)
+            }
+        }
+        
+        # Группируем по типам ресурсов
+        resource_types = {}
+        for result in filtered_results:
+            rtype = result['metadata']['resource_type']
+            resource_types[rtype] = resource_types.get(rtype, 0) + 1
+        
+        stats["resource_types"] = resource_types
+        
+        # Формируем ответ
+        response = {
+            "status": "success",
+            "message": f"Найдено {len(filtered_results)} документов (порог: {similarity_threshold})",
+            "stats": stats,
+            "results": filtered_results,
+            "query": query
+        }
+        
+        if not filtered_results:
+            response["status"] = "no_results"
+            response["message"] = f"Не найдено документов с порогом схожести {similarity_threshold}"
+            response["suggestion"] = "Попробуйте снизить порог similarity_threshold или изменить запрос"
+            response["debug_info"] = {
+                "raw_results_count": len(results),
+                "threshold_applied": similarity_threshold,
+                "index_size": index_size
+            }
+        
+        logger.info(f"✅ FAISS поиск завершен: {len(filtered_results)} результатов")
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /test_faiss_search: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": f"Ошибка FAISS поиска: {str(e)}",
+            "error_details": str(e) if debug else None
+        }), 500
+        
+@app.route("/faiss_status", methods=["GET"])
+def faiss_status():
+    """Статус FAISS индекса"""
+    try:
+        status = {
+            "faiss_index_path": search_service.faiss_index_path,
+            "faiss_vectorstore_loaded": search_service.faiss_vectorstore is not None,
+            "resources_by_id_loaded": len(search_service.resources_by_id) > 0,
+            "embedding_model_path": search_service.embedding_model_path
+        }
+        
+        if search_service.faiss_vectorstore:
+            status["index_size"] = search_service.faiss_vectorstore.index.ntotal
+            status["resources_count"] = len(search_service.resources_by_id)
+        
+        # Проверяем существование файлов индекса
+        if search_service.faiss_index_path:
+            import os
+            index_dir = Path(search_service.faiss_index_path)
+            if index_dir.exists():
+                files = []
+                for file in index_dir.glob("*"):
+                    size_mb = file.stat().st_size / (1024 * 1024)
+                    files.append({
+                        "name": file.name,
+                        "size_mb": round(size_mb, 2)
+                    })
+                status["index_files"] = files
+            else:
+                status["index_files_error"] = f"Директория не найдена: {index_dir}"
+        
+        return jsonify({
+            "status": "success",
+            "data": status
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса FAISS: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Ошибка получения статуса: {str(e)}"
+        }), 500
+        
 @app.route("/")
 def home():
     return "SalutBot API works!"

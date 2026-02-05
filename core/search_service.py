@@ -1,29 +1,29 @@
 import os
 import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional,Union
+from typing import Dict, List, Any, Optional, Union
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage,SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.documents import Document
-from core.relational_service import RelationalService
 import json
-from infrastructure.llm_integration import get_gigachat
-from .geo_service import GeoService
 import time
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from shapely.geometry import shape, mapping
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
 class SearchService:
     def __init__(
-    self, 
-    embedding_model_path: str,
-    llm_service: Optional[Any] = None
-):
+        self, 
+        embedding_model_path: str,
+        llm_service: Optional[Any] = None,
+        faiss_index_path: Optional[str] = None
+    ):
         """
         Args:
             faiss_index_path: Путь к директории с FAISS индексами
@@ -31,25 +31,325 @@ class SearchService:
             llm_service: Сервис LLM (опционально, для тестирования)
         """
         self.embedding_model_path = embedding_model_path
-        self.llm_service = llm_service or get_gigachat()
-        self.relational_service = RelationalService()
-        self.geo_service = GeoService()
+        self.llm_service = llm_service
+        self.relational_service = None  # Будет инициализирован позже
+        self.geo_service = None  # Будет инициализирован позже
         self.embedding_model = HuggingFaceEmbeddings(
             model_name=embedding_model_path,
             model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': False}
         )
+        self.object_synonyms = {}
+        self.reverse_object_synonyms = {}
+        
+        # FAISS атрибуты
+        self.faiss_index_path = faiss_index_path
+        self.faiss_vectorstore = None
+        self.resources_data = None
+        self.resources_by_id = {}
+        
+        # Инициализация зависимостей
+        self._init_dependencies()
+        
+        # Загрузка данных для FAISS
+        if faiss_index_path:
+            self._load_resources_data()
+    
+    def _init_dependencies(self):
+        """Инициализирует зависимости чтобы избежать циклического импорта"""
+        from core.relational_service import RelationalService
+        from .geo_service import GeoService
+        
+        self.relational_service = RelationalService()
+        self.geo_service = GeoService()
+        
+        # Загружаем синонимы
         self.object_synonyms = self._load_object_synonyms()
         self._build_reverse_object_synonyms_index()
-        
-    def _init_gigachat(self):
-        if self.llm is None:
-            self.llm = get_gigachat()
+    
+    def _load_resources_data(self):
+        """Загружает данные из resources_dist.json для сопоставления resource_id с полными документами"""
+        try:
+            # Ищем файл resources_dist.json в разных местах
+            base_dir = Path(__file__).parent.parent.parent
+            possible_paths = [
+                base_dir / "json_files" / "resources_dist.json",
+                base_dir.parent / "json_files" / "resources_dist.json",
+                Path.cwd() / "json_files" / "resources_dist.json",
+                Path("/json_files") / "resources_dist.json"
+            ]
             
-    def _get_llm(self):
-        if self.llm_service is None:
-            self.llm_service = get_gigachat()
-        return self.llm_service
+            resources_file = None
+            for path in possible_paths:
+                if path.exists():
+                    resources_file = path
+                    break
+            
+            if not resources_file:
+                logger.warning("Файл resources_dist.json не найден")
+                return
+            
+            logger.info(f"Загружаем ресурсы из: {resources_file}")
+            
+            with open(resources_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            self.resources_data = data
+            
+            # Создаем словарь для быстрого поиска по resource_id
+            for resource in data.get('resources', []):
+                resource_id = resource.get('identificator', {}).get('id')
+                if resource_id:
+                    self.resources_by_id[resource_id] = resource
+            
+            logger.info(f"Загружено {len(self.resources_by_id)} ресурсов для FAISS поиска")
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки resources_dist.json: {str(e)}")
+    
+    def load_faiss_index(self):
+        """Загружает FAISS индекс если он еще не загружен"""
+        if self.faiss_vectorstore is not None:
+            return self.faiss_vectorstore
+        
+        if not self.faiss_index_path:
+            logger.warning("Путь к FAISS индексу не указан")
+            return None
+        
+        try:
+            from langchain_community.vectorstores import FAISS
+            
+            logger.info(f"Загружаем FAISS индекс из {self.faiss_index_path}")
+            
+            if not os.path.exists(self.faiss_index_path):
+                logger.error(f"Директория с FAISS индексом не найдена: {self.faiss_index_path}")
+                return None
+            
+            self.faiss_vectorstore = FAISS.load_local(
+                self.faiss_index_path,
+                self.embedding_model,
+                allow_dangerous_deserialization=True
+            )
+            
+            logger.info(f"FAISS индекс загружен, содержит {self.faiss_vectorstore.index.ntotal} векторов")
+            return self.faiss_vectorstore
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки FAISS индекса: {str(e)}")
+            return None
+    
+    def search_in_faiss(self, query: str, k: int = 10, similarity_threshold: float = 0.8) -> List[Dict]:
+        """
+        Выполняет поиск в FAISS индексе по запросу
+        
+        Args:
+            query: Поисковый запрос
+            k: Количество результатов
+            similarity_threshold: Порог схожести (0.0-1.0)
+            
+        Returns:
+            Список найденных документов с метаданными
+        """
+        if not self.faiss_vectorstore:
+            if not self.load_faiss_index():
+                logger.warning("FAISS индекс не загружен")
+                return []
+        
+        try:
+            # Выполняем поиск в FAISS
+            results = self.faiss_vectorstore.similarity_search_with_score(query, k=k)
+            
+            # ФИКС: Преобразуем все numpy.float32 в обычные float
+            def convert_floats(obj):
+                if isinstance(obj, dict):
+                    return {k: convert_floats(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_floats(item) for item in obj]
+                elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
+                    return float(obj)
+                return obj
+            
+            # Фильтруем по порогу схожести и преобразуем в нужный формат
+            filtered_results = []
+            
+            for doc, score in results:
+                similarity = 1 - score  # Преобразуем расстояние в схожесть
+                
+                # Преобразуем similarity к float
+                similarity = float(similarity)
+                
+                if similarity >= similarity_threshold:
+                    # Извлекаем полный документ по resource_id из метаданных
+                    resource_id = doc.metadata.get('resource_id')
+                    full_document = self._get_full_document(resource_id, doc.page_content)
+                    
+                    if full_document:
+                        result = {
+                            'content': full_document,
+                            'similarity': similarity,
+                            'source': 'faiss_vector_search',
+                            'object_name': doc.metadata.get('common_name', ''),
+                            'object_type': self._normalize_object_type(doc.metadata.get('resource_type', 'unknown')),
+                            'feature_data': {
+                                'in_stoplist': doc.metadata.get('in_stoplist', 1),
+                                'source': doc.metadata.get('source', '')
+                            },
+                            'metadata': convert_floats(doc.metadata)  # Преобразуем метаданные
+                        }
+                        filtered_results.append(result)
+            
+            logger.info(f"FAISS поиск: найдено {len(filtered_results)} документов с порогом {similarity_threshold}")
+            return filtered_results
+            
+        except Exception as e:
+            logger.error(f"Ошибка поиска в FAISS: {str(e)}")
+            return []
+        
+    def _normalize_object_type(self, object_type: str) -> str:
+        """Нормализует тип объекта для совместимости с существующей системой"""
+        if not object_type:
+            return "unknown"
+        
+        type_mapping = {
+            'Текст': 'biological_entity',
+            'Географический объект': 'geographical_entity',
+            'Объект флоры': 'biological_entity',
+            'Объект фауны': 'biological_entity',
+            'biological_entity': 'biological_entity',
+            'geographical_entity': 'geographical_entity',
+            'modern_human_made': 'modern_human_made',
+            'ancient_human_made': 'ancient_human_made',
+            'organization': 'organization',
+            'research_project': 'research_project',
+            'volunteer_initiative': 'volunteer_initiative'
+        }
+        
+        return type_mapping.get(object_type, object_type.lower())
+    
+    def _get_full_document(self, resource_id: str, chunk_content: str) -> str:
+        """
+        Получает полный документ по resource_id или возвращает чанк как есть
+        
+        Args:
+            resource_id: ID ресурса из метаданных
+            chunk_content: Содержимое чанка
+            
+        Returns:
+            Полный текст документа
+        """
+        if not resource_id or not self.resources_by_id:
+            return chunk_content
+        
+        try:
+            # Ищем ресурс по ID
+            resource = self.resources_by_id.get(resource_id)
+            if not resource:
+                logger.debug(f"Ресурс с ID {resource_id} не найден в базе данных")
+                return chunk_content
+            
+            # Извлекаем полный текст в зависимости от типа ресурса
+            resource_type = resource.get('type')
+            
+            if resource_type == 'Текст':
+                # Для текстовых ресурсов используем content
+                content = resource.get('content', '')
+                if content:
+                    return content
+                
+                # Или извлекаем из structured_data если нет content
+                structured_data = resource.get('structured_data', {})
+                if structured_data:
+                    # Конвертируем structured_data в текстовый формат
+                    return self._convert_structured_data_to_text(structured_data)
+            
+            elif resource_type == 'Географический объект':
+                # Для географических объектов используем описание
+                description = resource.get('description', '')
+                common_name = resource.get('identificator', {}).get('name', {}).get('common', '')
+                
+                full_text = []
+                if common_name:
+                    full_text.append(common_name)
+                if description:
+                    full_text.append(description)
+                
+                return " ".join(full_text) if full_text else chunk_content
+            
+            # Возвращаем чанк если не смогли получить полный документ
+            return chunk_content
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения полного документа для {resource_id}: {str(e)}")
+            return chunk_content
+    
+    def _convert_structured_data_to_text(self, structured_data: Dict) -> str:
+        """
+        Конвертирует structured_data в читаемый текст
+        
+        Args:
+            structured_data: Структурированные данные
+            
+        Returns:
+            Текстовое представление
+        """
+        if not structured_data:
+            return ""
+        
+        sections = []
+        
+        for section_name, section_data in structured_data.items():
+            if isinstance(section_data, dict):
+                section_text = [f"{section_name}:"]
+                for key, value in section_data.items():
+                    if value and str(value).strip() and str(value) != '-':
+                        section_text.append(f"  {key}: {value}")
+                
+                if len(section_text) > 1:
+                    sections.append("\n".join(section_text))
+        
+        return "\n\n".join(sections)
+    
+    def vector_search_fallback(self, query: str, object_type: str = "all", 
+                          similarity_threshold: float = 0.8, 
+                          limit: int = 10) -> List[Dict]:
+        """
+        Fallback метод для векторного поиска когда реляционный поиск не дал результатов
+        
+        Args:
+            query: Поисковый запрос (clean_query если передан, иначе оригинальный)
+            object_type: Тип объекта для фильтрации
+            similarity_threshold: Порог схожести
+            limit: Лимит результатов
+            
+        Returns:
+            Список найденных документов
+        """
+        # Загружаем FAISS индекс если нужно
+        if not self.load_faiss_index():
+            return []
+        
+        # Выполняем поиск в FAISS
+        faiss_results = self.search_in_faiss(query, k=limit*2, similarity_threshold=similarity_threshold)
+        
+        
+        # Фильтруем по типу объекта если указан
+        if object_type != "all":
+            filtered_results = []
+            target_type = self._normalize_object_type(object_type)
+            
+            for result in faiss_results:
+                result_type = result.get('object_type', '').lower()
+                if result_type == target_type.lower():
+                    filtered_results.append(result)
+                elif target_type.lower() == 'biological_entity' and result_type in ['biological_entity', 'объект флоры', 'объект фауны']:
+                    filtered_results.append(result)
+                elif target_type.lower() == 'geographical_entity' and result_type in ['geographical_entity', 'географический объект']:
+                    filtered_results.append(result)
+            
+            faiss_results = filtered_results
+        
+        # Применяем лимит
+        return faiss_results[:limit]
     
     def _load_object_synonyms(self):
         """Загружает синонимы объектов из JSON файла"""
@@ -81,8 +381,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка загрузки синонимов объектов: {e}")
             return {}
-
-        
+    
     def _build_reverse_object_synonyms_index(self):
         """Создает обратный индекс для быстрого поиска по синонимам объектов"""
         logger.info(f"Начало построения индекса синонимов объектов")
@@ -213,7 +512,7 @@ class SearchService:
                 "original_name": object_name,
                 "resolved": False
             }
-        
+    
     def get_synonyms_for_name(self, name: str) -> Dict[str, Any]:
         """
         Возвращает все синонимы для заданного названия вида
@@ -268,14 +567,15 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка получения описания объекта '{object_name}': {str(e)}")
             return []
+    
     def get_object_descriptions_by_filters(
-    self,
-    filter_data: Dict[str, Any],
-    object_type: str = "all",
-    limit: int = 10,
-    in_stoplist: str = "1",
-    object_name: Optional[str] = None
-) -> List[Dict]:
+        self,
+        filter_data: Dict[str, Any],
+        object_type: str = "all",
+        limit: int = 10,
+        in_stoplist: str = "1",
+        object_name: Optional[str] = None
+    ) -> List[Dict]:
         """
         Поиск описаний объектов по фильтрам из JSON body с учетом in_stoplist
         и точным поиском по object_name если передан
@@ -292,7 +592,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка поиска объектов по фильтрам: {str(e)}")
             return []
-        
+    
     def get_object_descriptions_with_embedding(self, object_name: str, object_type: str, 
                                         query_embedding: List[float], 
                                         limit: int = 10, 
@@ -321,6 +621,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка получения описаний с эмбеддингом для '{object_name}': {str(e)}")
             return []
+    
     def search_objects_by_embedding(
         self, 
         query_embedding: List[float],
@@ -359,6 +660,13 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка семантического поиска объектов: {str(e)}")
             return []
+    
+    def _get_llm(self):
+        """Получает LLM сервис"""
+        if self.llm_service is None:
+            from infrastructure.llm_integration import get_gigachat
+            self.llm_service = get_gigachat()
+        return self.llm_service
     
     def _generate_gigachat_answer(self, question: str, context: str) -> Dict[str, Any]:
         """
@@ -412,11 +720,26 @@ class SearchService:
             
             logger.debug(f"Найден finish_reason: {finish_reason}")
             
-            return {
+            # ФИКС: Преобразуем все numpy.float32 в обычные float
+            def convert_floats(obj):
+                if isinstance(obj, dict):
+                    return {k: convert_floats(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_floats(item) for item in obj]
+                elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
+                    return float(obj)
+                return obj
+            
+            result_data = {
                 "content": response.content.strip() if hasattr(response, 'content') else "",
                 "finish_reason": finish_reason,
                 "success": finish_reason != 'blacklist'
             }
+            
+            # Преобразуем все float32 в float
+            result_data = convert_floats(result_data)
+            
+            return result_data
             
         except Exception as e:
             logger.error(f"Ошибка генерации ответа GigaChat: {str(e)}")
@@ -432,8 +755,7 @@ class SearchService:
                 "finish_reason": "error",
                 "success": False
             }
-    
-    
+            
     def search_images_by_features(
         self,
         species_name: str,
@@ -468,7 +790,7 @@ class SearchService:
                 "status": "error",
                 "message": f"Ошибка при поиске изображений: {str(e)}"
             }
-            
+    
     def get_text_descriptions(self, species_name: str, in_stoplist: str = "1") -> List[Dict]:
         """Получает все текстовые описания по названию вида с использованием синонимов и учетом in_stoplist"""
         try:
@@ -496,7 +818,7 @@ class SearchService:
         except Exception as e:
             logger.error(f"Ошибка получения описания через RelationalService: {str(e)}")
             return []
-        
+    
     def filter_text_descriptions_with_gigachat(self, user_query: str, descriptions: List[Dict]) -> List[Dict]:
         """Фильтрация текстовых описаний видов через GigaChat"""
         llm = self._get_llm()
@@ -544,10 +866,12 @@ class SearchService:
                 "ПРОАНАЛИЗИРУЙ и ВЕРНИ JSON ОТВЕТ БЕЗ КОММЕНТАРИЕВ:"
             ))
         ])
+        
         try:
             chain = prompt | llm | JsonOutputParser()
             response = chain.invoke({"user_query": user_query, "descriptions": descriptions_text})
             logger.debug(response)
+            
             if response.get("no_relevant_descriptions", False):
                 return []
                 
@@ -601,15 +925,15 @@ class SearchService:
             return descriptions
 
     def get_objects_in_area_by_type(
-    self,
-    area_geometry: dict,
-    object_type: Optional[str] = None,
-    object_subtype: Optional[str] = None,
-    object_name: Optional[str] = None,
-    limit: int = 70,
-    search_around: bool = False,
-    buffer_radius_km: float = 10.0
-) -> Dict[str, Any]:
+        self,
+        area_geometry: dict,
+        object_type: Optional[str] = None,
+        object_subtype: Optional[str] = None,
+        object_name: Optional[str] = None,
+        limit: int = 70,
+        search_around: bool = False,
+        buffer_radius_km: float = 10.0
+    ) -> Dict[str, Any]:
         """
         Поиск объектов в заданной области с фильтрацией по типу и имени
         """
@@ -675,14 +999,14 @@ class SearchService:
                 "objects": [],
                 "area_geometry": area_geometry
             }
-            
+    
     def search_objects_directly_by_name(
-    self,
-    object_name: str,
-    object_type: Optional[str] = None,
-    object_subtype: Optional[str] = None,
-    limit: int = 20
-) -> Dict[str, Any]:
+        self,
+        object_name: str,
+        object_type: Optional[str] = None,
+        object_subtype: Optional[str] = None,
+        limit: int = 20
+    ) -> Dict[str, Any]:
         """
         Прямой поиск объектов по имени без привязки к области
         """
@@ -711,15 +1035,15 @@ class SearchService:
                 "answer": f"Ошибка при поиске объекта '{object_name}'",
                 "objects": []
             }
-        
+    
     def get_objects_in_polygon(
-    self,
-    polygon_geojson: dict,
-    buffer_radius_km: float = 0,
-    object_type: str = None,
-    object_subtype: str = None,
-    limit: int = 70
-) -> Dict[str, Any]:
+        self,
+        polygon_geojson: dict,
+        buffer_radius_km: float = 0,
+        object_type: str = None,
+        object_subtype: str = None,
+        limit: int = 70
+    ) -> Dict[str, Any]:
         """Поиск объектов внутри полигона и в буферной зоне с поддержкой подтипов"""
         try:
             try:
@@ -817,17 +1141,17 @@ class SearchService:
                 "polygon": polygon_geojson,
                 "biological_objects": ""
             }
-            
+    
     def get_nearby_objects(
-    self, 
-    latitude: float, 
-    longitude: float, 
-    radius_km: float = 10, 
-    limit: int = 20,
-    object_type: str = None,
-    species_name: Optional[Union[str, List[str]]] = None,
-    in_stoplist: int = 1
-) -> Dict[str, Any]:
+        self, 
+        latitude: float, 
+        longitude: float, 
+        radius_km: float = 10, 
+        limit: int = 20,
+        object_type: str = None,
+        species_name: Optional[Union[str, List[str]]] = None,
+        in_stoplist: int = 1
+    ) -> Dict[str, Any]:
         try:
             start = time.perf_counter()
             results = self.geo_service.get_nearby_objects(
@@ -840,6 +1164,7 @@ class SearchService:
                 in_stoplist=in_stoplist
             )
             logger.info(f"Nearby objects search took: {time.perf_counter() - start:.2f}s")
+            
             if not results:
                 return {
                     "answer": f"В радиусе {radius_km} км не найдено объектов",

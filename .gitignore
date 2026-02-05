@@ -93,3 +93,5 @@ knowledge_base_scripts/Relational/pgvector/
 
 **/missing_geometry_objects.json
 **/OFF.xlsx
+
+**/knowledge_base_scripts/Vector/faiss_index/

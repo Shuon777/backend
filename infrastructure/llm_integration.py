@@ -32,7 +32,7 @@ def get_gigachat(params: Dict[str, Any] = None) -> GigaChat:
         'profanity_check': False,
         'temperature': 0.0, 
         'timeout': 120,  # Увеличено время ожидания
-        'scope': 'GIGACHAT_API_CORP'  # Добавлен scope для enterprise
+        'scope': 'GIGACHAT_API_PERS'  # Добавлен scope для enterprise
     }
     
     # Объединяем с переданными параметрами
