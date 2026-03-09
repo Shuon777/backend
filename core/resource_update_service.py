@@ -537,7 +537,6 @@ class ResourceUpdateService:
     def process_upload_chunked(self, json_archive_path: Optional[str] = None, 
                            images_archive_path: Optional[str] = None,
                            reload_database: bool = False,
-                           use_stubs: bool = True,
                            incremental: bool = True) -> Dict:
         """Основной метод обработки загрузки по чанкам"""
         results = {
@@ -625,13 +624,11 @@ class ResourceUpdateService:
             if reload_database:
                 logger.info("🚀 Запускаем перезагрузку базы данных...")
                 
-                # НЕ СОЗДАЕМ временный файл, postgres_adapter.py сам обрабатывает инкрементальный режим
-                # Запускаем перезагрузку БД
+                # Запускаем перезагрузку БД (параметр use_stubs удален)
                 for progress in self.reload_database_chunked(
                     reload_database=reload_database,
-                    use_stubs=use_stubs,
                     incremental=incremental,
-                    new_resources_file=None  # Не передаем временный файл
+                    new_resources_file=None
                 ):
                     yield {
                         "stage": "reload_database",
@@ -682,7 +679,6 @@ class ResourceUpdateService:
                 self.temp_dir = None
     
     def reload_database_chunked(self, reload_database: bool = False, 
-                            use_stubs: bool = True,
                             incremental: bool = True,
                             new_resources_file: Optional[str] = None):
         """Перезагрузка базы данных с отслеживанием прогресса"""
@@ -710,11 +706,8 @@ class ResourceUpdateService:
             adapter_script = scripts_dir / "postgres_adapter.py"
             
             if adapter_script.exists():
-                # Формируем команду БЕЗ --new-resources
+                # Формируем команду (параметр --use-stubs удален)
                 cmd = [sys.executable, str(adapter_script), "--json-file", str(self.resources_dist_path)]
-                
-                if use_stubs:
-                    cmd.append("--use-stubs")
                 
                 if incremental:
                     cmd.append("--incremental")
@@ -722,10 +715,6 @@ class ResourceUpdateService:
                 else:
                     cmd.append("--full")
                     logger.info("Режим: полная перезагрузка БД")
-                
-                # УБЕРИТЕ ЭТУ ЧАСТЬ - postgres_adapter.py не поддерживает --new-resources
-                # if new_resources_file:
-                #     cmd.extend(["--new-resources", str(new_resources_file)])
                 
                 logger.info(f"Команда: {' '.join(cmd)}")
                 
@@ -806,8 +795,6 @@ class ResourceUpdateService:
             return "insert"
         elif any(word in message_lower for word in ['индексы', 'index', 'индексирование']):
             return "indexing"
-        elif any(word in message_lower for word in ['векторы', 'vectors', 'embeddings']):
-            return "vectors"
         elif any(word in message_lower for word in ['завершено', 'completed', 'успешно']):
             return "completed"
         else:
@@ -859,7 +846,6 @@ class ResourceUpdateService:
         return summary
     
     def reload_relational_database(self, reload_database: bool = False, 
-                      use_stubs: bool = True,
                       incremental: bool = True,
                       new_resources_file: Optional[str] = None) -> bool:
         """Перезагружает или инкрементально обновляет реляционную базу данных"""
@@ -872,7 +858,6 @@ class ResourceUpdateService:
             logger.info(f"🛠️  НАЧАЛО reload_relational_database - ВХОДНЫЕ ПАРАМЕТРЫ:")
             logger.info(f"🛠️  reload_database={reload_database}")
             logger.info(f"🛠️  incremental={incremental}")
-            logger.info(f"🛠️  use_stubs={use_stubs}")
             logger.info(f"🛠️  new_resources_file={new_resources_file}")
             
             # Путь к скриптам
@@ -918,11 +903,8 @@ class ResourceUpdateService:
                     json_file_to_use = new_resources_file
                     logger.info(f"📄 Используем файл только с новыми ресурсами: {new_resources_file}")
                 
-                # Формируем команду
+                # Формируем команду (параметр --use-stubs удален)
                 cmd = [sys.executable, str(adapter_script), "--json-file", str(json_file_to_use)]
-                
-                if use_stubs:
-                    cmd.append("--use-stubs")
                 
                 # Определяем режим: полный или инкрементальный
                 if incremental:

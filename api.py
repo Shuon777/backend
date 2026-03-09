@@ -155,27 +155,24 @@ def log_error():
             "used_objects": [],
             "not_used_objects": []
         }), 500
+        
 @app.route("/reload_database", methods=["POST"])
 def reload_database():
     """
     Эндпоинт для перезагрузки базы данных без добавления новых ресурсов
-    
-    Принимает:
-    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ
-    - incremental: флаг инкрементального обновления (true/false)
-    - use_stubs: флаг использования заглушек для векторов (true/false)
+    (параметр use_stubs удалён, так как эмбеддинги больше не используются в реляционной БД)
     """
     try:
         logger.info(f"📤 /reload_database - получен запрос")
         
         reload_database_param = request.form.get('reload_database', 'false').lower() == 'true'
         incremental = request.form.get('incremental', 'true').lower() == 'true'
-        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        # Параметр use_stubs больше не передаётся
+        # use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
         
         logger.info(f"Параметры запроса:")
         logger.info(f"  - reload_database: {reload_database_param}")
         logger.info(f"  - incremental: {incremental}")
-        logger.info(f"  - use_stubs: {use_stubs}")
         
         if not reload_database_param:
             return jsonify({
@@ -185,7 +182,6 @@ def reload_database():
                 "not_used_objects": []
             }), 400
         
-        # Проверяем существование ресурсного файла
         if not os.path.exists(RESOURCES_DIST_PATH):
             logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
             return jsonify({
@@ -195,17 +191,15 @@ def reload_database():
                 "not_used_objects": []
             }), 404
         
-        # Создаем сервис для обработки
         service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
         
-        # Вызываем метод только для перезагрузки БД
+        # Вызываем метод без use_stubs
         results = service.reload_database_only(
             reload_database=reload_database_param,
-            use_stubs=use_stubs,
             incremental=incremental
+            # use_stubs удалён
         )
         
-        # Формируем ответ
         response_data = {
             "status": "success",
             "message": "База данных успешно перезагружена",
@@ -239,18 +233,12 @@ def reload_database():
             "used_objects": [],
             "not_used_objects": []
         }), 500
-        
+
 @app.route("/upload_resources", methods=["POST"])
 def upload_resources():
     """
     Эндпоинт для загрузки архивов с аннотациями и изображениями
-    
-    Принимает:
-    - json_archive: zip архив с JSON аннотациями (не обязательно)
-    - images_archive: zip архив с изображениями (не обязательно)
-    - reload_database: флаг перезагрузки реляционной базы (true/false) - ОБЯЗАТЕЛЬНЫЙ для обновления БД
-    - incremental_update: флаг инкрементального обновления (true/false)
-    - use_stubs: флаг использования заглушек для векторов (true/false)
+    (параметр use_stubs удалён)
     """
     try:
         logger.info(f"📤 /upload_resources - получен запрос")
@@ -259,19 +247,15 @@ def upload_resources():
         has_images = 'images_archive' in request.files and request.files['images_archive'].filename
         
         reload_database = request.form.get('reload_database', 'false').lower() == 'true'
-        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'  # По умолчанию true
-        use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
+        incremental_update = request.form.get('incremental_update', 'true').lower() == 'true'
+        # use_stubs больше не используется
+        # use_stubs = request.form.get('use_stubs', 'true').lower() == 'true'
         
         logger.info(f"Параметры запроса:")
         logger.info(f"  - Есть JSON архив: {has_json}")
         logger.info(f"  - Есть архив изображений: {has_images}")
         logger.info(f"  - reload_database: {reload_database}")
         logger.info(f"  - incremental_update: {incremental_update}")
-        logger.info(f"  - use_stubs: {use_stubs}")
-        
-        logger.info(f"🔍 Проверка значений из request.form:")
-        for key in request.form:
-            logger.info(f"  - {key}: {request.form.get(key)}")
         
         if not os.path.exists(RESOURCES_DIST_PATH):
             logger.error(f"Файл resources_dist.json не найден: {RESOURCES_DIST_PATH}")
@@ -309,12 +293,13 @@ def upload_resources():
             
             service = ResourceUpdateService(RESOURCES_DIST_PATH, IMAGES_DIR)
             
+            # Вызываем метод без use_stubs
             results = service.process_upload(
                 json_archive_path=json_archive_path,
                 images_archive_path=images_archive_path,
                 reload_database=reload_database,
-                use_stubs=use_stubs,
                 incremental=incremental_update
+                # use_stubs удалён
             )
             
             if reload_database:
@@ -372,7 +357,7 @@ def upload_resources():
             "used_objects": [],
             "not_used_objects": []
         }), 500
-        
+             
 @app.route("/find_off_near_attractions", methods=["POST"])
 def find_off_near_attractions():
     """
@@ -2023,7 +2008,7 @@ def get_object_description():
     
     object_name = request.args.get("object_name")
     query = request.args.get("query")
-    clean_query = request.args.get("clean_query", query)  # Новый параметр: по умолчанию используем query
+    clean_query = request.args.get("clean_query", query)
     limit = int(request.args.get("limit", 1500))
     similarity_threshold = float(request.args.get("similarity_threshold", 0.35))
     include_similarity = request.args.get("include_similarity", "false").lower() == "true"
@@ -2034,7 +2019,8 @@ def get_object_description():
     save_prompt = request.args.get("save_prompt", "false").lower() == "true"
     in_stoplist = request.args.get("in_stoplist", "1")
     return_raw_documents = request.args.get("return_raw_documents", "false").lower() == "true"
-    # НОВЫЕ ПАРАМЕТРЫ ДЛЯ FAISS
+    
+    # Параметры для FAISS fallback
     force_vector_search = request.args.get("force_vector_search", "false").lower() == "true"
     vector_similarity_threshold = float(request.args.get("vector_similarity_threshold", "0.03"))
     use_vector_fallback = request.args.get("use_vector_fallback", "true").lower() == "true"
@@ -2051,7 +2037,7 @@ def get_object_description():
             "object_name": object_name,
             "object_type": object_type,
             "query": query,
-            "clean_query": clean_query,  # Добавлено в debug
+            "clean_query": clean_query,
             "limit": limit,
             "similarity_threshold": similarity_threshold,
             "include_similarity": include_similarity,
@@ -2060,7 +2046,6 @@ def get_object_description():
             "filter_data": filter_data,
             "save_prompt": save_prompt,
             "in_stoplist": in_stoplist,
-            # НОВЫЕ ПАРАМЕТРЫ
             "force_vector_search": force_vector_search,
             "vector_similarity_threshold": vector_similarity_threshold,
             "use_vector_fallback": use_vector_fallback
@@ -2082,34 +2067,29 @@ def get_object_description():
         
         if resolved_object_info.get("resolved", False):
             object_name = resolved_object_info["main_form"]
-            # Не меняем object_type, если он не был передан изначально
             if object_type != "all":
                 object_type = resolved_object_info["object_type"]
             logger.info(f"✅ Разрешен синоним объекта: '{resolved_object_info['original_name']}' -> '{object_name}' (тип: {object_type})")
         else:
             logger.info(f"ℹ️ Синоним для объекта '{object_name}' не найден, используем оригинальное название")
 
-    # ВАЖНО: Если use_gigachat_answer=True, то query обязателен
     if use_gigachat_answer and not query:
         response = {"error": "Параметр 'query' обязателен при use_gigachat_answer=true"}
         if debug_mode:
             response["debug"] = debug_info
         return jsonify(response), 400
 
-    # Если нет ни object_name, ни query, ни filter_data - возвращаем ошибку
     if not object_name and not query and not filter_data:
         response = {"error": "Необходимо указать object_name, query или передать фильтры в body"}
         if debug_mode:
             response["debug"] = debug_info
         return jsonify(response), 400
 
-    # Вспомогательная функция для извлечения external_id
     def extract_external_id(desc_data):
         """Упрощенная функция извлечения external_id из данных описания"""
         if not desc_data or not isinstance(desc_data, dict):
             return None
         
-        # Основной путь: structured_data -> metadata -> meta_info -> id
         if 'structured_data' in desc_data and isinstance(desc_data['structured_data'], dict):
             structured_data = desc_data['structured_data']
             
@@ -2126,7 +2106,6 @@ def get_object_description():
         
         return None
 
-    # НОВАЯ ФУНКЦИЯ: Извлечение всех external_id из списка описаний
     def extract_all_external_ids(descriptions):
         """Извлекает все external_id из списка описаний"""
         external_ids = []
@@ -2139,7 +2118,6 @@ def get_object_description():
         
         return external_ids
 
-    # НОВАЯ ФУНКЦИЯ: Правильное формирование заголовка
     def get_proper_title(desc, fallback_name=None, index=1):
         """
         Формирует корректный заголовок в порядке приоритета:
@@ -2151,22 +2129,18 @@ def get_object_description():
         if not isinstance(desc, dict):
             return f"Описание {index}"
         
-        # 1. Приоритет: object_name из базы данных
         title = desc.get("object_name")
         if title and title.strip():
             return title.strip()
         
-        # 2. Заголовок из feature_data
         feature_data = desc.get("feature_data", {})
         if isinstance(feature_data, dict):
             title = feature_data.get("title")
             if title and title.strip():
                 return title.strip()
         
-        # 3. Заголовок из structured_data
         structured_data = desc.get("structured_data", {})
         if isinstance(structured_data, dict):
-            # Проверяем различные возможные пути в structured_data
             metadata = structured_data.get("metadata", {})
             if isinstance(metadata, dict):
                 meta_info = metadata.get("meta_info", {})
@@ -2175,40 +2149,31 @@ def get_object_description():
                     if title and title.strip():
                         return title.strip()
             
-            # Проверяем корневые поля structured_data
             title = structured_data.get("title")
             if title and title.strip():
                 return title.strip()
         
-        # 4. Первая строка content (как крайний вариант)
         content = desc.get("content", "")
         if content and isinstance(content, str):
             lines = content.strip().split('\n')
             if lines and lines[0].strip():
                 first_line = lines[0].strip()
-                # Обрезаем слишком длинные строки
                 if len(first_line) > 100:
                     return first_line[:97] + "..."
                 return first_line
         
-        # 5. Заголовок по умолчанию с использованием имени объекта
         if fallback_name and fallback_name.strip():
             return f"{fallback_name} - описание {index}"
         
         return f"Описание {index}"
 
     try:
-        # Определяем лимиты для разных случаев
         search_limit = limit if limit > 0 else 1500
         context_limit = 6
         
-        # ПРОВЕРЯЕМ УСЛОВИЯ ДЛЯ FAISS FALLBACK
-        use_faiss_fallback = False
-        faiss_results = []
-        
-        # Определяем запрос для векторного поиска (используем clean_query если передан)
+        # Определяем запрос для векторного поиска
         search_query = None
-        if clean_query:  # ИСПРАВЛЕНИЕ: Используем clean_query в первую очередь для FAISS
+        if clean_query:
             search_query = clean_query
         elif query:
             search_query = query
@@ -2217,156 +2182,96 @@ def get_object_description():
         elif filter_data:
             search_query = json.dumps(filter_data, ensure_ascii=False)
         
-        # Проверяем, нужно ли сразу использовать FAISS (force_vector_search)
+        # Логика поиска: сначала реляционный, при необходимости FAISS fallback
+        use_faiss_fallback = False
+        faiss_results = []
+        descriptions = []
+        
+        # Если принудительный векторный поиск
         if force_vector_search and search_query and use_gigachat_answer:
             logger.info(f"🚀 Активирован принудительный FAISS поиск для запроса: {search_query}")
-            
-            # Выполняем векторный поиск
             faiss_results = search_service.vector_search_fallback(
-                query=search_query,  # Используем search_query (clean_query или query)
+                query=search_query,
                 object_type=object_type,
                 similarity_threshold=vector_similarity_threshold,
                 limit=context_limit
             )
-            
             if faiss_results:
                 use_faiss_fallback = True
                 descriptions = faiss_results
-                logger.info(f"✅ FAISS поиск нашел {len(faiss_results)} документов")
-                
                 debug_info["faiss_search"] = {
                     "activated": True,
                     "reason": "force_vector_search",
                     "query_used": search_query,
-                    "clean_query_used": clean_query is not None,  # Отмечаем, что использовался clean_query
                     "results_found": len(faiss_results),
                     "similarity_threshold": vector_similarity_threshold,
                     "search_source": "faiss_vector_store"
                 }
             else:
-                logger.info("❌ FAISS поиск не нашел документов")
                 descriptions = []
                 debug_info["faiss_search"] = {
                     "activated": True,
                     "reason": "force_vector_search",
                     "query_used": search_query,
-                    "clean_query_used": clean_query is not None,
                     "results_found": 0,
                     "search_source": "faiss_vector_store"
                 }
         else:
-            # Обычный поиск через реляционную базу
+            # Обычный реляционный поиск
             if filter_data:
                 descriptions = search_service.get_object_descriptions_by_filters(
                     filter_data=filter_data,
                     object_type=object_type,
                     limit=search_limit,
                     in_stoplist=in_stoplist,
-                    object_name=object_name  # Передаем разрешенное название для точного поиска
+                    object_name=object_name
                 )
                 search_method = "filter_search"
-                
             elif query:
-                # Используем clean_query для создания эмбеддинга если он передан
-                query_for_embedding = clean_query if clean_query else query
-                embedding = search_service.embedding_model.embed_query(query_for_embedding)
-                
-                if not isinstance(embedding, list):
-                    logger.error(f"Embedding должен быть списком, получен: {type(embedding)}")
-                    return jsonify({"error": "Internal embedding error"}), 500
-                    
-                if not all(isinstance(x, (int, float)) for x in embedding):
-                    logger.error("Embedding содержит нечисловые элементы")
-                    return jsonify({"error": "Internal embedding error"}), 500
-                    
-                if object_name:
-                    descriptions = search_service.get_object_descriptions_with_embedding(
-                        object_name=object_name,
-                        object_type=object_type,
-                        query_embedding=embedding,
-                        limit=search_limit,
-                        similarity_threshold=similarity_threshold,
-                        in_stoplist=in_stoplist
-                    )
-                    search_method = "object_with_embedding"
-                else:
-                    descriptions = search_service.search_objects_by_embedding(
-                        query_embedding=embedding,
-                        object_type=object_type,
-                        limit=search_limit,
-                        similarity_threshold=similarity_threshold,
-                        in_stoplist=in_stoplist
-                    )
-                    search_method = "semantic_search"
-                    
+                # Семантический поиск через FAISS fallback (если разрешён)
+                # В реляционной БД больше нет векторного поиска, поэтому либо обычный текстовый, либо сразу FAISS
+                # Для совместимости оставляем возможность использовать FAISS при отсутствии результатов
+                descriptions = search_service.get_object_descriptions_by_filters(
+                    filter_data={},  # пустые фильтры для поиска по всем
+                    object_type=object_type,
+                    limit=search_limit,
+                    in_stoplist=in_stoplist,
+                    object_name=object_name
+                ) if object_name else []
+                search_method = "text_search"
             else:
-                descriptions_text = search_service.get_object_descriptions(
-                    object_name, 
-                    object_type,
-                    in_stoplist=in_stoplist
+                descriptions = search_service.get_object_descriptions(
+                    object_name, object_type, in_stoplist=in_stoplist
                 )
-                
-                if include_similarity:
-                    descriptions = [{"content": text, "similarity": None, "source": "content"} 
-                                  for text in descriptions_text]
-                else:
-                    descriptions = [{"content": text, "source": "content"} 
-                                  for text in descriptions_text]
                 search_method = "simple_search"
 
-            # Debug информация о результатах поиска
-            if debug_mode:
-                debug_info["search_method"] = search_method
-                debug_info["search_results"] = {
-                    "total_found": len(descriptions),
-                    "search_limit": search_limit,
-                    "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions and search_method != "simple_search" else []
-                }
-            
-            # ПРОВЕРЯЕМ НАДО ЛИ ИСПОЛЬЗОВАТЬ FAISS FALLBACK
-            if use_gigachat_answer and use_vector_fallback and not descriptions and search_query:
+            # Если результатов нет и разрешён fallback, пробуем FAISS
+            if use_vector_fallback and not descriptions and search_query:
                 logger.info(f"🔄 Активирован FAISS fallback (нет результатов в реляционной базе): {search_query}")
-                
-                # Выполняем векторный поиск как fallback
                 faiss_results = search_service.vector_search_fallback(
                     query=search_query,
                     object_type=object_type,
                     similarity_threshold=vector_similarity_threshold,
                     limit=context_limit
                 )
-                
                 if faiss_results:
                     use_faiss_fallback = True
                     descriptions = faiss_results
-                    logger.info(f"✅ FAISS fallback нашел {len(faiss_results)} документов")
-                    
                     debug_info["faiss_fallback"] = {
                         "activated": True,
                         "reason": "no_relational_results",
                         "query_used": search_query,
-                        "clean_query_used": clean_query is not None,
                         "results_found": len(faiss_results),
                         "similarity_threshold": vector_similarity_threshold,
                         "search_source": "faiss_vector_store"
                     }
-                else:
-                    logger.info("❌ FAISS fallback не нашел документов")
-                    debug_info["faiss_fallback"] = {
-                        "activated": True,
-                        "reason": "no_relational_results",
-                        "query_used": search_query,
-                        "clean_query_used": clean_query is not None,
-                        "results_found": 0,
-                        "search_source": "faiss_vector_store"
-                    }
 
-        # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
+        # Фильтрация по stoplist
         safe_descriptions = []
         stoplisted_descriptions = []
 
         for desc in descriptions:
             if isinstance(desc, dict):
-                # Для FAISS результатов feature_data может быть словарем
                 if use_faiss_fallback:
                     feature_data = desc.get('feature_data', {})
                     if isinstance(feature_data, dict):
@@ -2390,26 +2295,7 @@ def get_object_description():
                         stoplisted_descriptions.append(desc)
             else:
                 safe_descriptions.append(desc)
-                
-        if debug_mode and descriptions:
-            debug_info["sample_description_structure"] = []
-            for i, desc in enumerate(descriptions[:2]):
-                if isinstance(desc, dict):
-                    sample_structure = {
-                        "index": i,
-                        "keys": list(desc.keys()),
-                        "has_feature_data": 'feature_data' in desc,
-                        "has_structured_data": 'structured_data' in desc,
-                        "object_name": desc.get("object_name"),
-                        "calculated_title": get_proper_title(desc, object_name, i+1)
-                    }
-                    if 'feature_data' in desc and isinstance(desc['feature_data'], dict):
-                        sample_structure["feature_data_keys"] = list(desc['feature_data'].keys())
-                        if 'metadata' in desc['feature_data'] and isinstance(desc['feature_data']['metadata'], dict):
-                            sample_structure["metadata_keys"] = list(desc['feature_data']['metadata'].keys())
-                    debug_info["sample_description_structure"].append(sample_structure)
-        
-        # Debug информация о фильтрации in_stoplist
+
         if debug_mode:
             debug_info["in_stoplist_filter"] = {
                 "total_before_filter": len(descriptions),
@@ -2418,49 +2304,34 @@ def get_object_description():
                 "requested_level": in_stoplist
             }
 
-        # Если после фильтрации не осталось безопасных документов
         if not safe_descriptions:
             response = {"error": "Я не готов про это разговаривать"}
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 400
 
-        # Используем только безопасные описания для дальнейшей обработки
         descriptions = safe_descriptions
 
-        # Обработка use_gigachat_filter
+        # Фильтрация Gigachat
         if use_gigachat_filter:
-            # Для фильтрации Gigachat используем оригинальный query
             filter_query = query if query else object_name
-            
             if debug_mode:
                 debug_info["before_gigachat_filter"] = {
                     "count": len(descriptions),
                     "filter_query": filter_query
                 }
-            
-            filtered_descriptions = search_service.filter_text_descriptions_with_gigachat(
-                filter_query, 
-                descriptions
-            )
-            
+            descriptions = search_service.filter_text_descriptions_with_gigachat(filter_query, descriptions)
             if debug_mode:
                 debug_info["after_gigachat_filter"] = {
-                    "count": len(filtered_descriptions),
-                    "filtered_out": len(descriptions) - len(filtered_descriptions)
+                    "count": len(descriptions),
+                    "filtered_out": len(safe_descriptions) - len(descriptions)
                 }
 
-            descriptions = filtered_descriptions
+        # Формирование used_objects и not_used_objects
+        used_objects = []
+        not_used_objects = []
 
-        # ============================================================================
-        # ФОРМИРОВАНИЕ used_objects И not_used_objects ДЛЯ РАЗНЫХ СЦЕНАРИЕВ
-        # ============================================================================
-        
-        used_objects = []      # Объекты, использованные в контексте GigaChat
-        not_used_objects = []  # Объекты, не вошедшие в контекст GigaChat
-
-        # Обработка use_gigachat_answer
-        # Обработка use_gigachat_answer
+        # Если используется GigaChat ответ
         if use_gigachat_answer:
             if not descriptions:
                 response = {"error": "Не найдено описаний для генерации ответа"}
@@ -2468,32 +2339,27 @@ def get_object_description():
                     response["debug"] = debug_info
                 return jsonify(response), 404
 
-            # ФИЛЬТРАЦИЯ BLACKLIST_RISK
+            # Фильтрация blacklist_risk
             safe_descriptions_for_gigachat = []
             blacklisted_descriptions = []
-            
             for desc in descriptions:
                 if isinstance(desc, dict):
                     feature_data = desc.get("feature_data", {})
                     if feature_data and feature_data.get("blacklist_risk") is True:
                         blacklisted_descriptions.append(desc)
                         continue
-                    
                     if desc.get("blacklist_risk") is True:
                         blacklisted_descriptions.append(desc)
                         continue
-                
                 safe_descriptions_for_gigachat.append(desc)
-            
-            # Debug информация о фильтрации blacklist
+
             if debug_mode:
                 debug_info["blacklist_filter"] = {
                     "total_before_filter": len(descriptions),
                     "safe_after_filter": len(safe_descriptions_for_gigachat),
                     "blacklisted_count": len(blacklisted_descriptions)
                 }
-            
-            # Если после фильтрации не осталось безопасных документов
+
             if not safe_descriptions_for_gigachat:
                 response = {"error": "Все описания содержат риск blacklist и не могут быть использованы для генерации ответа GigaChat"}
                 if debug_mode:
@@ -2502,18 +2368,12 @@ def get_object_description():
 
             descriptions_for_context = safe_descriptions_for_gigachat
 
-            # Берем топ безопасных описаний для контекста
             if all('similarity' in desc for desc in descriptions_for_context):
                 context_descriptions = sorted(descriptions_for_context, key=lambda x: x.get('similarity', 0), reverse=True)[:context_limit]
             else:
                 context_descriptions = descriptions_for_context[:context_limit]
-            
-            # ============================================================================
-            # ФОРМИРОВАНИЕ СПИСКОВ ОБЪЕКТОВ ДЛЯ СЦЕНАРИЯ С GIGACHAT
-            # ============================================================================
-            
-            # used_objects - объекты из контекста GigaChat (топ по релевантности)
-            used_objects = []
+
+            # used_objects - объекты из контекста
             for desc in context_descriptions:
                 if isinstance(desc, dict):
                     obj_info = {
@@ -2524,9 +2384,8 @@ def get_object_description():
                         "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     }
                     used_objects.append(obj_info)
-            
-            # not_used_objects - объекты, не вошедшие в контекст GigaChat
-            not_used_objects = []
+
+            # not_used_objects - остальные
             remaining_descriptions = [desc for desc in descriptions_for_context if desc not in context_descriptions]
             for desc in remaining_descriptions:
                 if isinstance(desc, dict):
@@ -2538,75 +2397,58 @@ def get_object_description():
                         "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     }
                     not_used_objects.append(obj_info)
-            
-            # ============================================================================
-            # ПРОВЕРКА ПАРАМЕТРА return_raw_documents - ВОЗВРАЩАЕМ СЫРЫЕ ДОКУМЕНТЫ БЕЗ GIGACHAT
-            # ============================================================================
+
+            # Если запрошен возврат сырых документов
             if return_raw_documents:
                 logger.info("📄 Возвращаем сырые документы без вызова GigaChat")
-                
-                # ИЗВЛЕКАЕМ ВСЕ external_id из безопасных описаний
                 external_ids = extract_all_external_ids(descriptions_for_context)
-                
-                # Форматируем безопасные описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
                 formatted_descriptions = []
                 for i, desc in enumerate(descriptions_for_context, 1):
                     if isinstance(desc, dict):
                         content = desc.get("content", "")
                         similarity = desc.get("similarity")
                         source = desc.get("source", "unknown")
-                        
-                        # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
                         external_id = extract_external_id(desc)
-                        
-                        # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
                         title = get_proper_title(desc, object_name, i)
-                        
                         formatted_desc = {
                             "id": i,
-                            "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
+                            "title": title,
                             "content": content,
                             "source": source,
                             "feature_data": desc.get("feature_data", {}),
                             "structured_data": desc.get("structured_data", {})
                         }
-                        
-                        # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
                         if external_id:
                             formatted_desc["external_id"] = external_id
-                        
                         if similarity is not None:
                             formatted_desc["similarity"] = round(similarity, 4)
-                            
                         formatted_descriptions.append(formatted_desc)
                     else:
                         formatted_descriptions.append({
                             "id": i,
-                            "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
+                            "title": get_proper_title(None, object_name, i),
                             "content": desc,
                             "source": "content"
                         })
 
-                # Сортируем по similarity если есть
                 if all('similarity' in desc for desc in formatted_descriptions):
                     formatted_descriptions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
                 response_data = {
                     "count": len(formatted_descriptions),
                     "descriptions": formatted_descriptions,
-                    "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
-                    "external_ids": external_ids,  # Дублируем для обратной совместимости
+                    "external_id": external_ids,
+                    "external_ids": external_ids,
                     "query_used": query if query else "simple_search",
-                    "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
+                    "clean_query_used": clean_query if clean_query else None,
                     "similarity_threshold": similarity_threshold if query else None,
                     "use_gigachat_filter": use_gigachat_filter,
                     "use_gigachat_answer": True,
-                    "raw_documents": True,  # Пометка, что это сырые документы
+                    "raw_documents": True,
                     "message": "Возвращены исходные документы (GigaChat пропущен по запросу return_raw_documents)",
                     "formatted": True,
                     "in_stoplist_filter_applied": True,
                     "in_stoplist_level": in_stoplist,
-                    # ДОБАВЛЯЕМ ОБЪЕКТЫ
                     "used_objects": used_objects,
                     "not_used_objects": not_used_objects
                 }
@@ -2618,7 +2460,6 @@ def get_object_description():
                 if filter_data:
                     response_data["filters_applied"] = filter_data
 
-                # Добавляем информацию о разрешении синонимов
                 if resolved_object_info and resolved_object_info.get("resolved", False):
                     response_data["synonym_resolution"] = {
                         "original_name": resolved_object_info["original_name"],
@@ -2626,7 +2467,6 @@ def get_object_description():
                         "original_type": resolved_object_info.get("original_type", object_type)
                     }
 
-                # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
                 if use_faiss_fallback:
                     response_data["search_source"] = "faiss_vector_store"
                     response_data["vector_similarity_threshold"] = vector_similarity_threshold
@@ -2644,35 +2484,26 @@ def get_object_description():
                     }
 
                 return jsonify(response_data)
-            
-            # ============================================================================
-            # ОБЫЧНАЯ ГЕНЕРАЦИЯ ОТВЕТА GIGACHAT (ЕСЛИ return_raw_documents = False)
-            # ============================================================================
-            
-            # Объединяем топ безопасных описаний в контекст
+
+            # Обычная генерация ответа GigaChat
             context = "\n\n".join([
                 desc["content"] if isinstance(desc, dict) else desc 
                 for desc in context_descriptions
             ])
 
-            # Добавляем информацию о количестве найденных записей
             total_count = len(descriptions_for_context)
             count_info = f"\n\nВсего найдено безопасных записей: {total_count}"
             if len(blacklisted_descriptions) > 0:
                 count_info += f" (исключено {len(blacklisted_descriptions)} записей с риском blacklist)"
             if total_count > context_limit:
                 count_info += f" (в контекст включено топ-{context_limit} по релевантности)"
-            
-            # Добавляем информацию о источнике поиска
             if use_faiss_fallback:
                 count_info += f"\nПоиск выполнен в FAISS векторной базе (порог схожести: {vector_similarity_threshold})"
                 if clean_query:
                     count_info += f"\nИспользован очищенный запрос для поиска: '{clean_query}'"
-            
-            logger.debug(f"Контекст для GigaChat: {len(context)} символов")
+
             context += count_info
-            
-            # СОХРАНЕНИЕ ПОЛНОГО ПРОМПТА (используем оригинальный query для GigaChat)
+
             full_prompt = f"""Ты эксперт по Байкальской природной территории. 
             Используй твою базу знаний для точных ответов на вопросы пользователя.
 
@@ -2685,86 +2516,67 @@ def get_object_description():
             Твоя база знаний:
             {context}
 
-            Вопрос: {query}  # Используем оригинальный query для GigaChat!
+            Вопрос: {query}
 
             Ответ:"""
-            
+
             if save_prompt:
                 current_dir = Path(__file__).parent
                 timestamp = int(time.time())
                 prompt_filename = current_dir / f"gigachat_prompt_{timestamp}.txt"
-                
                 try:
                     with open(prompt_filename, 'w', encoding='utf-8') as f:
                         f.write(full_prompt)
                     logger.info(f"✅ Полный промпт сохранен в: {prompt_filename}")
                 except Exception as e:
                     logger.error(f"❌ Ошибка сохранения промпта: {e}")
-            
-            # Генерируем ответ с помощью GigaChat
+
             try:
-                gigachat_result = search_service._generate_gigachat_answer(query, context)  # Используем оригинальный query
-                
-                # Проверяем, был ли ответ заблокирован
+                gigachat_result = search_service._generate_gigachat_answer(query, context)
                 is_blacklist = gigachat_result.get("finish_reason") == "blacklist" or not gigachat_result.get("success", True)
-                
-                # Если ответ заблокирован, возвращаем форматированные безопасные описания
+
                 if is_blacklist:
                     logger.info("🚫 GigaChat вернул blacklist, возвращаем форматированные безопасные описания")
-                    
-                    # ИЗВЛЕКАЕМ ВСЕ external_id из безопасных описаний
                     external_ids = extract_all_external_ids(descriptions_for_context)
-                    
-                    # Форматируем безопасные описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
                     formatted_descriptions = []
                     for i, desc in enumerate(descriptions_for_context, 1):
                         if isinstance(desc, dict):
                             content = desc.get("content", "")
                             similarity = desc.get("similarity")
                             source = desc.get("source", "unknown")
-                            
-                            # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
                             external_id = extract_external_id(desc)
-                            
-                            # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
                             title = get_proper_title(desc, object_name, i)
-                            
                             formatted_desc = {
                                 "id": i,
-                                "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
+                                "title": title,
                                 "content": content,
                                 "source": source,
                                 "feature_data": desc.get("feature_data", {}),
                                 "structured_data": desc.get("structured_data", {})
                             }
-                            
-                            # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
                             if external_id:
                                 formatted_desc["external_id"] = external_id
-                            
                             if similarity is not None:
                                 formatted_desc["similarity"] = round(similarity, 4)
-                                
                             formatted_descriptions.append(formatted_desc)
                         else:
                             formatted_descriptions.append({
                                 "id": i,
-                                "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
+                                "title": get_proper_title(None, object_name, i),
                                 "content": desc,
                                 "source": "content"
                             })
 
-                    # Сортируем по similarity если есть
                     if all('similarity' in desc for desc in formatted_descriptions):
                         formatted_descriptions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
                     response_data = {
                         "count": len(formatted_descriptions),
                         "descriptions": formatted_descriptions,
-                        "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
-                        "external_ids": external_ids,  # Дублируем для обратной совместимости
+                        "external_id": external_ids,
+                        "external_ids": external_ids,
                         "query_used": query if query else "simple_search",
-                        "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
+                        "clean_query_used": clean_query if clean_query else None,
                         "similarity_threshold": similarity_threshold if query else None,
                         "use_gigachat_filter": use_gigachat_filter,
                         "use_gigachat_answer": True,
@@ -2773,7 +2585,6 @@ def get_object_description():
                         "formatted": True,
                         "in_stoplist_filter_applied": True,
                         "in_stoplist_level": in_stoplist,
-                        # ДОБАВЛЯЕМ ОБЪЕКТЫ
                         "used_objects": used_objects,
                         "not_used_objects": not_used_objects
                     }
@@ -2785,7 +2596,6 @@ def get_object_description():
                     if filter_data:
                         response_data["filters_applied"] = filter_data
 
-                    # Добавляем информацию о разрешении синонимов
                     if resolved_object_info and resolved_object_info.get("resolved", False):
                         response_data["synonym_resolution"] = {
                             "original_name": resolved_object_info["original_name"],
@@ -2793,7 +2603,6 @@ def get_object_description():
                             "original_type": resolved_object_info.get("original_type", object_type)
                         }
 
-                    # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
                     if use_faiss_fallback:
                         response_data["search_source"] = "faiss_vector_store"
                         response_data["vector_similarity_threshold"] = vector_similarity_threshold
@@ -2812,72 +2621,59 @@ def get_object_description():
                         }
 
                     return jsonify(response_data)
-                
-                # Если ответ не заблокирован, возвращаем обычный ответ GigaChat
-                gigachat_response = gigachat_result.get("content", "")
 
-                # ИЗВЛЕКАЕМ ВСЕ external_id из контекстных описаний
+                gigachat_response = gigachat_result.get("content", "")
                 external_ids = extract_all_external_ids(context_descriptions)
-                
                 source_descriptions_summary = []
 
                 for desc in context_descriptions:
                     if isinstance(desc, dict):
-                        # ИЗВЛЕКАЕМ EXTERNAL_ID
                         external_id = extract_external_id(desc)
-                        
-                        # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
                         title = get_proper_title(desc, object_name, len(source_descriptions_summary) + 1)
-                        
                         desc_summary = {
-                            "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
+                            "title": title,
                             "content_preview": desc.get("content", "")[:200] + "..." if len(desc.get("content", "")) > 200 else desc.get("content", ""),
                             "source": desc.get("source", "unknown"),
                             "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
                         }
-                        
                         if external_id:
                             desc_summary["external_id"] = external_id
-                            
                         source_descriptions_summary.append(desc_summary)
 
                 response_data = {
                     "gigachat_answer": gigachat_response,
-                    "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
-                    "external_ids": external_ids,  # Дублируем для обратной совместимости
-                    "source_descriptions": source_descriptions_summary,  # КРАТКАЯ ИНФОРМАЦИЯ ОБ ИСТОЧНИКАХ
+                    "external_id": external_ids,
+                    "external_ids": external_ids,
+                    "source_descriptions": source_descriptions_summary,
                     "context_used": {
                         "descriptions_count": len(context_descriptions),
                         "total_descriptions": total_count,
                         "blacklisted_excluded": len(blacklisted_descriptions),
                         "external_ids_count": len(external_ids)
                     },
-                    "query": query,  # Оригинальный query
-                    "clean_query": clean_query if clean_query else None,  # Очищенный query если был передан
+                    "query": query,
+                    "clean_query": clean_query if clean_query else None,
                     "object_name": object_name if object_name else "semantic_search",
                     "object_type": object_type,
                     "in_stoplist_level": in_stoplist,
-                    # ДОБАВЛЯЕМ ОБЪЕКТЫ
                     "used_objects": used_objects,
                     "not_used_objects": not_used_objects
                 }
-                
-                # Добавляем информацию о разрешении синонимов
+
                 if resolved_object_info and resolved_object_info.get("resolved", False):
                     response_data["synonym_resolution"] = {
                         "original_name": resolved_object_info["original_name"],
                         "resolved_name": object_name,
                         "original_type": resolved_object_info.get("original_type", object_type)
                     }
-                
-                # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
+
                 if use_faiss_fallback:
                     response_data["search_source"] = "faiss_vector_store"
                     response_data["vector_similarity_threshold"] = vector_similarity_threshold
                     response_data["faiss_fallback_used"] = True
                     response_data["faiss_search_query"] = search_query
                     response_data["clean_query_for_faiss"] = clean_query if clean_query else None
-                
+
                 if debug_mode:
                     response_data["debug"] = debug_info
                     response_data["debug"]["gigachat_generation"] = {
@@ -2887,6 +2683,7 @@ def get_object_description():
                         "prompt_saved": save_prompt,
                         "external_ids_found": len(external_ids)
                     }
+
                 def convert_floats(obj):
                     if isinstance(obj, dict):
                         return {k: convert_floats(v) for k, v in obj.items()}
@@ -2896,11 +2693,9 @@ def get_object_description():
                         return float(obj)
                     return obj
 
-                # Преобразуем response_data перед возвратом
                 response_data = convert_floats(response_data)
-
                 return jsonify(response_data)
-                
+
             except Exception as e:
                 logger.error(f"Ошибка генерации ответа GigaChat: {str(e)}")
                 error_response = {"error": "Ошибка генерации ответа GigaChat"}
@@ -2908,14 +2703,8 @@ def get_object_description():
                     debug_info["gigachat_error"] = str(e)
                     error_response["debug"] = debug_info
                 return jsonify(error_response), 500
-        # ============================================================================
-        # ФОРМИРОВАНИЕ СПИСКОВ ОБЪЕКТОВ ДЛЯ СЦЕНАРИЯ БЕЗ GIGACHAT
-        # ============================================================================
-        
-        # Для сценария без GigaChat:
-        # used_objects - все найденные объекты (так как они все "используются" в ответе)
-        # not_used_objects - пустой массив
-        
+
+        # Сценарий без GigaChat
         for desc in descriptions:
             if isinstance(desc, dict):
                 obj_info = {
@@ -2927,86 +2716,68 @@ def get_object_description():
                 }
                 used_objects.append(obj_info)
 
-        # Форматированный ответ без GigaChat
         if not descriptions:
             response = {"error": "Я не готов про это разговаривать"}
             if debug_mode:
                 response["debug"] = debug_info
             return jsonify(response), 404
 
-        # ИЗВЛЕКАЕМ ВСЕ external_id из всех описаний
         external_ids = extract_all_external_ids(descriptions)
-        
-        # Форматируем описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
         formatted_descriptions = []
         for i, desc in enumerate(descriptions, 1):
             if isinstance(desc, dict):
                 content = desc.get("content", "")
                 similarity = desc.get("similarity")
                 source = desc.get("source", "unknown")
-                
-                # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
                 external_id = extract_external_id(desc)
-                
-                # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
                 title = get_proper_title(desc, object_name, i)
-                
                 formatted_desc = {
                     "id": i,
-                    "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
+                    "title": title,
                     "content": content,
                     "source": source,
                     "feature_data": desc.get("feature_data", {}),
                     "structured_data": desc.get("structured_data", {})
                 }
-                
-                # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
                 if external_id:
                     formatted_desc["external_id"] = external_id
-                
                 if similarity is not None:
                     formatted_desc["similarity"] = round(similarity, 4)
-                    
                 formatted_descriptions.append(formatted_desc)
             else:
                 formatted_descriptions.append({
                     "id": i,
-                    "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
+                    "title": get_proper_title(None, object_name, i),
                     "content": desc,
                     "source": "content"
                 })
 
-        # Сортируем по similarity если есть
         if all('similarity' in desc for desc in formatted_descriptions):
             formatted_descriptions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
         response_data = {
             "count": len(formatted_descriptions),
             "descriptions": formatted_descriptions,
-            "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
-            "external_ids": external_ids,  # Дублируем для обратной совместимости
+            "external_id": external_ids,
+            "external_ids": external_ids,
             "query_used": query if query else "simple_search",
-            "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
+            "clean_query_used": clean_query if clean_query else None,
             "similarity_threshold": similarity_threshold if query else None,
             "use_gigachat_filter": use_gigachat_filter,
             "in_stoplist_filter_applied": True,
             "in_stoplist_level": in_stoplist,
             "formatted": True,
-            # ДОБАВЛЯЕМ ОБЪЕКТЫ
             "used_objects": used_objects,
-            "not_used_objects": []  # В сценарии без GigaChat все объекты используются
+            "not_used_objects": []
         }
 
-        # Добавляем информацию об объекте
         if object_name:
             response_data["object_name"] = object_name
             response_data["object_type"] = object_type
 
-        # Добавляем информацию о фильтрах
         if filter_data:
             response_data["filters_applied"] = filter_data
 
-        # Добавляем информацию о разрешении синонимов
         if resolved_object_info and resolved_object_info.get("resolved", False):
             response_data["synonym_resolution"] = {
                 "original_name": resolved_object_info["original_name"],
@@ -3014,7 +2785,6 @@ def get_object_description():
                 "original_type": resolved_object_info.get("original_type", object_type)
             }
 
-        # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
         if use_faiss_fallback:
             response_data["search_source"] = "faiss_vector_store"
             response_data["vector_similarity_threshold"] = vector_similarity_threshold
@@ -3022,7 +2792,6 @@ def get_object_description():
             response_data["faiss_search_query"] = search_query
             response_data["clean_query_for_faiss"] = clean_query if clean_query else None
 
-        # Добавляем debug информацию
         if debug_mode:
             response_data["debug"] = debug_info
             response_data["debug"]["external_ids_extracted"] = {
@@ -3031,15 +2800,14 @@ def get_object_description():
             }
 
         return jsonify(response_data)
-        
+
     except Exception as e:
         logger.error(f"Ошибка получения описания: {str(e)}", exc_info=True)
         error_response = {"error": "Внутренняя ошибка сервера"}
         if debug_mode:
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
-        return jsonify(error_response), 500
-    
+        return jsonify(error_response), 500  
           
 @app.route("/species/description/", methods=["GET"])
 def get_species_description():
@@ -3052,6 +2820,11 @@ def get_species_description():
     use_gigachat_filter = request.args.get("use_gigachat_filter", "false").lower() == "true"
     debug_mode = request.args.get("debug_mode", "false").lower() == "true"
     in_stoplist = request.args.get("in_stoplist", "1")
+    
+    # Параметры для FAISS fallback
+    force_vector_search = request.args.get("force_vector_search", "false").lower() == "true"
+    vector_similarity_threshold = float(request.args.get("vector_similarity_threshold", "0.03"))
+    use_vector_fallback = request.args.get("use_vector_fallback", "true").lower() == "true"
 
     if not species_name:
         response = {
@@ -3070,86 +2843,73 @@ def get_species_description():
             "similarity_threshold": similarity_threshold,
             "include_similarity": include_similarity,
             "use_gigachat_filter": use_gigachat_filter,
-            "in_stoplist": in_stoplist
+            "in_stoplist": in_stoplist,
+            "force_vector_search": force_vector_search,
+            "vector_similarity_threshold": vector_similarity_threshold,
+            "use_vector_fallback": use_vector_fallback
         },
         "timestamp": time.time()
     }
 
     try:
-        if query:
-            embedding = search_service.embedding_model.embed_query(query)
-            
-            if not isinstance(embedding, list):
-                logger.error(f"Embedding должен быть списком, получен: {type(embedding)}")
-                return jsonify({"error": "Internal embedding error"}), 500
-                
-            if not all(isinstance(x, (int, float)) for x in embedding):
-                logger.error("Embedding содержит нечисловые элементы")
-                return jsonify({"error": "Internal embedding error"}), 500
-                
-            # Debug информация об embedding
-            if debug_mode:
-                debug_info["embedding"] = {
-                    "type": type(embedding).__name__,
-                    "length": len(embedding),
-                    "first_5_elements": embedding[:5] if isinstance(embedding, list) else "N/A"
-                }
-            
-            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ПЕРЕД ВЫЗОВОМ
-            logger.info(f"🔍 ВЫЗОВ get_text_descriptions_with_embedding:")
-            logger.info(f"   - species_name: {species_name}")
-            logger.info(f"   - query: {query}")
-            logger.info(f"   - similarity_threshold: {similarity_threshold}")
-            logger.info(f"   - in_stoplist: {in_stoplist}")
-            logger.info(f"   - limit: {limit}")
-            
-            # ИСПРАВЛЕНИЕ: Используем relational_service вместо search_service
-            descriptions = search_service.relational_service.get_text_descriptions_with_embedding(
-                species_name=species_name,
-                query_embedding=embedding,
-                limit=limit,
-                similarity_threshold=similarity_threshold,
-                in_stoplist=in_stoplist
+        # Определяем запрос для векторного поиска
+        search_query = query if query else species_name
+        
+        # Логика поиска
+        use_faiss_fallback = False
+        descriptions = []
+        
+        # Если принудительный векторный поиск
+        if force_vector_search and query:
+            logger.info(f"🚀 Активирован принудительный FAISS поиск для вида: {species_name}, запрос: {query}")
+            faiss_results = search_service.vector_search_fallback(
+                query=query,
+                object_type="biological_entity",
+                similarity_threshold=vector_similarity_threshold,
+                limit=limit
             )
-            
-            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ РЕЗУЛЬТАТОВ
-            logger.info(f"📊 РЕЗУЛЬТАТЫ get_text_descriptions_with_embedding:")
-            logger.info(f"   - Найдено описаний: {len(descriptions)}")
-            
-            for i, desc in enumerate(descriptions):
-                if isinstance(desc, dict):
-                    logger.info(f"   - Описание {i}:")
-                    logger.info(f"     * similarity: {desc.get('similarity')}")
-                    logger.info(f"     * object_name: {desc.get('object_name')}")
-                    logger.info(f"     * has_content: {bool(desc.get('content'))}")
-                    logger.info(f"     * content_length: {len(desc.get('content', ''))}")
-                    logger.info(f"     * has_structured_data: {bool(desc.get('structured_data'))}")
-                    logger.info(f"     * source: {desc.get('source')}")
-                    if desc.get('structured_data'):
-                        logger.info(f"     * structured_data_keys: {list(desc.get('structured_data', {}).keys())}")
-                else:
-                    logger.info(f"   - Описание {i}: тип {type(desc)}")
-            
-            # Debug информация о результатах поиска
-            if debug_mode:
-                debug_info["search_method"] = "embedding_similarity"
-                debug_info["search_results"] = {
-                    "total_found": len(descriptions),
-                    "similarities": [desc.get("similarity", 0) for desc in descriptions] if descriptions else []
+            if faiss_results:
+                use_faiss_fallback = True
+                descriptions = faiss_results
+                debug_info["faiss_search"] = {
+                    "activated": True,
+                    "reason": "force_vector_search",
+                    "query_used": query,
+                    "results_found": len(faiss_results),
+                    "similarity_threshold": vector_similarity_threshold,
+                    "search_source": "faiss_vector_store"
                 }
-            
         else:
-            # ИСПРАВЛЕНИЕ: Используем search_service.get_text_descriptions
-            descriptions = search_service.get_text_descriptions(species_name, in_stoplist=in_stoplist)
-            
-            # Debug информация
-            if debug_mode:
-                debug_info["search_method"] = "simple_search"
-                debug_info["search_results"] = {
-                    "total_found": len(descriptions)
-                }
+            # Обычный реляционный поиск
+            if query:
+                # Если есть query, сначала пробуем обычный поиск, потом FAISS fallback
+                descriptions = search_service.get_text_descriptions(species_name, in_stoplist=in_stoplist)
                 
-        # Проверяем, есть ли безопасные записи (с подходящим in_stoplist)
+                # Если результатов нет и разрешён fallback, пробуем FAISS
+                if use_vector_fallback and not descriptions:
+                    logger.info(f"🔄 Активирован FAISS fallback для вида: {species_name}, запрос: {query}")
+                    faiss_results = search_service.vector_search_fallback(
+                        query=query,
+                        object_type="biological_entity",
+                        similarity_threshold=vector_similarity_threshold,
+                        limit=limit
+                    )
+                    if faiss_results:
+                        use_faiss_fallback = True
+                        descriptions = faiss_results
+                        debug_info["faiss_fallback"] = {
+                            "activated": True,
+                            "reason": "no_relational_results",
+                            "query_used": query,
+                            "results_found": len(faiss_results),
+                            "similarity_threshold": vector_similarity_threshold,
+                            "search_source": "faiss_vector_store"
+                        }
+            else:
+                # Простой поиск без query
+                descriptions = search_service.get_text_descriptions(species_name, in_stoplist=in_stoplist)
+
+        # Фильтрация по stoplist
         safe_descriptions = []
         stoplisted_descriptions = []
         
@@ -3157,12 +2917,17 @@ def get_species_description():
         logger.info(f"   - Всего описаний до фильтрации: {len(descriptions)}")
         
         for desc in descriptions:
-            # Проверяем feature_data на наличие in_stoplist
             if isinstance(desc, dict):
-                feature_data = desc.get("feature_data", {})
-                desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
+                if use_faiss_fallback:
+                    feature_data = desc.get('feature_data', {})
+                    if isinstance(feature_data, dict):
+                        desc_in_stoplist = feature_data.get('in_stoplist')
+                    else:
+                        desc_in_stoplist = desc.get('in_stoplist')
+                else:
+                    feature_data = desc.get("feature_data", {})
+                    desc_in_stoplist = feature_data.get("in_stoplist") if feature_data else None
                 
-                # Если in_stoplist не указан или <= запрошенному уровню, считаем безопасным
                 try:
                     requested_level = int(in_stoplist)
                     if desc_in_stoplist is None or int(desc_in_stoplist) <= requested_level:
@@ -3172,7 +2937,6 @@ def get_species_description():
                         stoplisted_descriptions.append(desc)
                         logger.info(f"   ✗ STOPLIST: in_stoplist={desc_in_stoplist} > запрошенного {requested_level}")
                 except (ValueError, TypeError):
-                    # Если ошибка преобразования, используем уровень по умолчанию (1)
                     if desc_in_stoplist is None or int(desc_in_stoplist) <= 1:
                         safe_descriptions.append(desc)
                         logger.info(f"   ✓ БЕЗОПАСНО (по умолчанию): in_stoplist={desc_in_stoplist}")
@@ -3180,11 +2944,9 @@ def get_species_description():
                         stoplisted_descriptions.append(desc)
                         logger.info(f"   ✗ STOPLIST (по умолчанию): in_stoplist={desc_in_stoplist}")
             else:
-                # Для простых строк считаем безопасными
                 safe_descriptions.append(desc)
                 logger.info(f"   ✓ БЕЗОПАСНО: простое описание")
 
-        # Debug информация о фильтрации in_stoplist
         if debug_mode:
             debug_info["in_stoplist_filter"] = {
                 "total_before_filter": len(descriptions),
@@ -3197,7 +2959,6 @@ def get_species_description():
         logger.info(f"   - Безопасные описания: {len(safe_descriptions)}")
         logger.info(f"   - Исключено по stoplist: {len(stoplisted_descriptions)}")
 
-        # Если после фильтрации не осталось безопасных документов
         if not safe_descriptions:
             logger.warning(f"🚫 НЕТ БЕЗОПАСНЫХ ОПИСАНИЙ для '{species_name}'")
             response = {
@@ -3209,44 +2970,36 @@ def get_species_description():
                 response["debug"] = debug_info
             return jsonify(response), 400
 
-        # Используем только безопасные описания для дальнейшей обработки
         descriptions = safe_descriptions
 
-        # ============================================================================
-        # ФОРМИРОВАНИЕ used_objects И not_used_objects
-        # ============================================================================
-        used_objects = []      # Все найденные объекты (в этом эндпоинте все используются)
-        not_used_objects = []  # Пустой массив (все объекты используются)
+        # Формирование used_objects
+        used_objects = []
+        not_used_objects = []
 
-        # В этом эндпоинте used_objects содержит информацию о виде
         for desc in descriptions:
             similarity = None
             if isinstance(desc, dict) and desc.get("similarity") is not None:
                 try:
                     similarity_val = desc.get("similarity")
-                    # ФИКС: Проверяем, что similarity валидно и не NaN
                     if similarity_val is not None and not math.isnan(float(similarity_val)):
                         similarity = round(float(similarity_val), 4)
                 except (ValueError, TypeError):
                     similarity = None
             
-            # Получаем имя объекта из описания или используем переданное species_name
             object_name = desc.get("object_name", species_name) if isinstance(desc, dict) else species_name
             
             used_objects.append({
                 "name": object_name,
                 "type": "biological_entity",
                 "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
-                "similarity": similarity
+                "similarity": similarity,
+                "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
             })
 
+        # Фильтрация Gigachat
         if use_gigachat_filter:
             filter_query = query if query else species_name
             
-            logger.debug("Описания для фильтрации с Gigachat")
-            logger.debug(descriptions)
-            
-            # Debug информация до фильтрации
             if debug_mode:
                 debug_info["before_gigachat_filter"] = {
                     "count": len(descriptions),
@@ -3258,14 +3011,12 @@ def get_species_description():
                 descriptions
             )
             
-            # Debug информация после фильтрации
             if debug_mode:
                 debug_info["after_gigachat_filter"] = {
                     "count": len(filtered_descriptions),
                     "filtered_out": len(descriptions) - len(filtered_descriptions)
                 }
 
-            # Обновляем used_objects после фильтрации Gigachat
             if filtered_descriptions:
                 used_objects = []
                 for desc in filtered_descriptions:
@@ -3274,7 +3025,8 @@ def get_species_description():
                         "name": object_name,
                         "type": "biological_entity", 
                         "source": desc.get("source", "unknown") if isinstance(desc, dict) else "content",
-                        "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None
+                        "similarity": round(desc.get("similarity", 0), 4) if isinstance(desc, dict) and desc.get("similarity") else None,
+                        "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     })
 
             descriptions = filtered_descriptions
@@ -3290,27 +3042,19 @@ def get_species_description():
                 response["debug"] = debug_info
             return jsonify(response), 404
 
-        # ============================================================================
-        # ФОРМАТИРОВАНИЕ ОТВЕТА С ДОБАВЛЕНИЕМ ИМЕНИ ОБЪЕКТА В CONTENT
-        # ============================================================================
-        
+        # Форматирование ответа
         def format_content_with_title(desc, index):
             """Форматирует контент с добавлением заголовка в markdown формате"""
             if isinstance(desc, dict):
                 content = desc.get("content", "")
                 object_name = desc.get("object_name", species_name)
                 
-                # Создаем заголовок в markdown формате
                 title_header = f"** {object_name} **\n\n"
-                
-                # Объединяем заголовок с контентом
                 formatted_content = title_header + content
                 return formatted_content
             else:
-                # Для простых строк
                 return f"# {species_name}\n\n{desc}"
         
-        # Форматируем ответ в зависимости от параметров
         if include_similarity:
             formatted_descriptions = []
             for i, desc in enumerate(descriptions, 1):
@@ -3324,11 +3068,9 @@ def get_species_description():
                         "similarity": round(desc.get("similarity", 0), 4) if desc.get("similarity") else None
                     }
                     
-                    # Добавляем structured_data если есть
                     if desc.get("structured_data"):
                         formatted_desc["structured_data"] = desc.get("structured_data")
                     
-                    # Добавляем species_features если есть
                     if desc.get("species_features"):
                         formatted_desc["species_features"] = desc.get("species_features")
                         
@@ -3340,18 +3082,6 @@ def get_species_description():
                         "object_name": species_name,
                         "object_type": "biological_entity"
                     })
-            
-            response_data = {
-                "count": len(formatted_descriptions),
-                "descriptions": formatted_descriptions,
-                "query_used": query if query else "simple_search",
-                "similarity_threshold": similarity_threshold if query else None,
-                "use_gigachat_filter": use_gigachat_filter,
-                "in_stoplist_filter_applied": True,
-                "in_stoplist_level": in_stoplist,
-                "used_objects": used_objects,
-                "not_used_objects": not_used_objects
-            }
         else:
             formatted_descriptions = []
             for i, desc in enumerate(descriptions, 1):
@@ -3364,11 +3094,9 @@ def get_species_description():
                         "object_type": "biological_entity"
                     }
                     
-                    # Добавляем structured_data если есть
                     if desc.get("structured_data"):
                         formatted_desc["structured_data"] = desc.get("structured_data")
                     
-                    # Добавляем species_features если есть
                     if desc.get("species_features"):
                         formatted_desc["species_features"] = desc.get("species_features")
                         
@@ -3380,20 +3108,26 @@ def get_species_description():
                         "object_name": species_name,
                         "object_type": "biological_entity"
                     })
-            
-            response_data = {
-                "count": len(formatted_descriptions),
-                "descriptions": formatted_descriptions,
-                "query_used": query if query else "simple_search",
-                "similarity_threshold": similarity_threshold if query else None,
-                "use_gigachat_filter": use_gigachat_filter,
-                "in_stoplist_filter_applied": True,
-                "in_stoplist_level": in_stoplist,
-                "used_objects": used_objects,
-                "not_used_objects": not_used_objects
-            }
 
-        # Добавляем debug информацию
+        response_data = {
+            "count": len(formatted_descriptions),
+            "descriptions": formatted_descriptions,
+            "query_used": query if query else "simple_search",
+            "similarity_threshold": similarity_threshold if query else None,
+            "use_gigachat_filter": use_gigachat_filter,
+            "in_stoplist_filter_applied": True,
+            "in_stoplist_level": in_stoplist,
+            "used_objects": used_objects,
+            "not_used_objects": not_used_objects
+        }
+
+        # Добавляем информацию о FAISS fallback
+        if use_faiss_fallback:
+            response_data["search_source"] = "faiss_vector_store"
+            response_data["vector_similarity_threshold"] = vector_similarity_threshold
+            response_data["faiss_fallback_used"] = True
+            response_data["faiss_search_query"] = query
+
         if debug_mode:
             response_data["debug"] = debug_info
 
@@ -3411,7 +3145,7 @@ def get_species_description():
             debug_info["error"] = str(e)
             error_response["debug"] = debug_info
         return jsonify(error_response), 500
-     
+      
 @app.route("/get_coords", methods=["POST"])
 def api_get_coords():
     data = request.get_json()

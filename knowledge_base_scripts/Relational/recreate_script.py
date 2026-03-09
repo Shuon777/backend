@@ -1,16 +1,8 @@
 import os
 import psycopg2
-from psycopg2 import sql
 import json
 import sys
 from pathlib import Path
-from pgvector.psycopg2 import register_vector
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from embedding_config import embedding_config, get_model_dimension
 
 class DatabaseRecreator:
     def __init__(self):
@@ -21,51 +13,31 @@ class DatabaseRecreator:
             "host": os.getenv("DB_HOST", "localhost"),
             "port": os.getenv("DB_PORT", "5432")
         }
-        
+
         self.species_synonyms_path = self._get_species_synonyms_path()
         self.species_synonyms = self._load_species_synonyms()
-        
+
         self.connection = None
         self.cursor = None
-        
-        current_model = os.getenv("EMBEDDING_MODEL", embedding_config.current_model)
-        embedding_dimension = os.getenv("EMBEDDING_DIMENSION")
-        
-        if embedding_dimension:
-            self.embedding_dimension = int(embedding_dimension)
-        else:
-            self.embedding_dimension = get_model_dimension(current_model)
-            
-        self.embedding_model_path = embedding_config.get_model_path(current_model)
-        
-        print(f"📏 Размерность эмбеддингов: {self.embedding_dimension}")
-        print(f"🎯 Активная модель: {current_model}")
-        print(f"📁 Путь к модели: {self.embedding_model_path}")
 
     def _get_species_synonyms_path(self):
-        """Определяем путь к файлу species_synonyms.json"""
         current_dir = Path(__file__).parent
         base_dir = current_dir.parent.parent
         json_files_dir = base_dir / "json_files"
         return json_files_dir / "species_synonyms.json"
 
     def _load_species_synonyms(self):
-        """Загружает синонимы видов из JSON файла"""
         try:
             with open(self.species_synonyms_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             print(f"Файл синонимов не найден: {self.species_synonyms_path}")
             return {}
-        except json.JSONDecodeError as e:
-            print(f"Ошибка парсинга JSON файла синонимов: {e}")
-            return {}
         except Exception as e:
             print(f"Ошибка загрузки синонимов: {e}")
             return {}
-    
+
     def connect(self):
-        """Установка соединения с базой данных"""
         try:
             self.connection = psycopg2.connect(**self.db_config)
             self.cursor = self.connection.cursor()
@@ -75,15 +47,13 @@ class DatabaseRecreator:
             raise
 
     def disconnect(self):
-        """Закрытие соединения с базой данных"""
         if self.cursor:
             self.cursor.close()
         if self.connection:
             self.connection.close()
         print("Соединение с базой данных закрыто")
-        
+
     def execute_script(self, script):
-        """Выполнение SQL-скрипта"""
         try:
             self.cursor.execute(script)
             self.connection.commit()
@@ -94,10 +64,9 @@ class DatabaseRecreator:
             raise
 
     def drop_tables(self):
-        """Удаление всех таблиц"""
         drop_script = """
         SET session_replication_role = replica;
-        
+
         DROP TABLE IF EXISTS 
             public.ancient_human_made,
             public.audio_content,
@@ -139,17 +108,13 @@ class DatabaseRecreator:
             public.error_log
         CASCADE;
 
-        DROP EXTENSION IF EXISTS postgis CASCADE;
-
         SET session_replication_role = DEFAULT;
         """
         self.execute_script(drop_script)
 
     def create_tables(self):
-        """Создание всех таблиц и индексов"""
-        create_script = f"""
+        create_script = """
         CREATE EXTENSION IF NOT EXISTS postgis;
-        CREATE EXTENSION IF NOT EXISTS vector;
 
         -- Универсальные идентификаторы сущностей
         CREATE TABLE entity_identifier (
@@ -162,7 +127,6 @@ class DatabaseRecreator:
             name_latin VARCHAR(500)
         );
 
-        -- Новые типы контента
         CREATE TABLE document_content (
             id SERIAL PRIMARY KEY,
             title VARCHAR(500) NOT NULL,
@@ -188,19 +152,17 @@ class DatabaseRecreator:
             feature_data JSONB
         );
 
-        -- Таблица достоверности с указанием столбца
         CREATE TABLE reliability (
             id SERIAL PRIMARY KEY,
             entity_table VARCHAR(100) NOT NULL,
             entity_id INT NOT NULL,
-            column_name VARCHAR(100),  -- Название столбца (если NULL - вся запись)
+            column_name VARCHAR(100),
             reliability_value VARCHAR(50) NOT NULL,
             comment TEXT,
             CHECK (entity_table <> ''),
             UNIQUE (entity_table, entity_id, column_name)
         );
 
-        -- Погодная привязка с временной меткой
         CREATE TABLE weather_reference (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -212,14 +174,12 @@ class DatabaseRecreator:
             weather_conditions VARCHAR(255)
         );
 
-        -- Парковая привязка
         CREATE TABLE park_reference (
             id SERIAL PRIMARY KEY,
             park_activity_type VARCHAR(50) NOT NULL,
             description TEXT
         );
 
-        -- Экологическая привязка
         CREATE TABLE ecological_reference (
             id SERIAL PRIMARY KEY,
             ecosystem_features TEXT,
@@ -230,7 +190,6 @@ class DatabaseRecreator:
             ecological_disaster BOOLEAN
         );
 
-        -- Территориальная привязка
         CREATE TABLE territorial_reference (
             id SERIAL PRIMARY KEY,
             territory_type VARCHAR(100) NOT NULL,
@@ -238,7 +197,6 @@ class DatabaseRecreator:
             natural_conditions TEXT
         );
 
-        -- Основные сущности контента (без reliability)
         CREATE TABLE map_content (
             id SERIAL PRIMARY KEY,
             title VARCHAR(500) NOT NULL,
@@ -246,17 +204,16 @@ class DatabaseRecreator:
             geometry GEOMETRY(Geometry, 4326) NOT NULL,
             feature_data JSONB
         );
-        
+
         CREATE TABLE text_content (
             id SERIAL PRIMARY KEY,
             title VARCHAR(500),
-            content TEXT,  -- Убрано NOT NULL
+            content TEXT,
             structured_data JSONB,
             description TEXT,
-            feature_data JSONB,
-            embedding vector({self.embedding_dimension})
+            feature_data JSONB
         );
-        
+
         CREATE TABLE image_content (
             id SERIAL PRIMARY KEY,
             title VARCHAR(500) NOT NULL,
@@ -372,7 +329,6 @@ class DatabaseRecreator:
             feature_data JSONB
         );
 
-        -- Вспомогательные сущности
         CREATE TABLE author (
             id SERIAL PRIMARY KEY,
             full_name VARCHAR(255) NOT NULL,
@@ -390,7 +346,6 @@ class DatabaseRecreator:
             month SMALLINT CHECK (month BETWEEN 1 AND 12)
         );
 
-        -- Универсальные связи
         CREATE TABLE entity_identifier_link (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -421,7 +376,6 @@ class DatabaseRecreator:
             PRIMARY KEY (source_id, source_type, target_id, target_type)
         );
 
-        -- Географические привязки
         CREATE TABLE entity_geo (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -429,7 +383,6 @@ class DatabaseRecreator:
             PRIMARY KEY (entity_id, entity_type, geographical_entity_id)
         );
 
-        -- Территориальные привязки
         CREATE TABLE entity_territorial (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -437,7 +390,6 @@ class DatabaseRecreator:
             PRIMARY KEY (entity_id, entity_type, territorial_id)
         );
 
-        -- Погодные привязки
         CREATE TABLE entity_weather (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -445,7 +397,6 @@ class DatabaseRecreator:
             PRIMARY KEY (entity_id, entity_type, weather_id)
         );
 
-        -- Парковые привязки
         CREATE TABLE entity_park (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -453,7 +404,6 @@ class DatabaseRecreator:
             PRIMARY KEY (entity_id, entity_type, park_id)
         );
 
-        -- Экологические привязки
         CREATE TABLE entity_ecological (
             entity_id INT NOT NULL,
             entity_type VARCHAR(30) NOT NULL,
@@ -467,9 +417,9 @@ class DatabaseRecreator:
             title VARCHAR(500) NOT NULL,
             description TEXT,
             link_type VARCHAR(50),
-            platform VARCHAR(100)  -- Rutube, YouTube, VK и т.д.
+            platform VARCHAR(100)
         );
-            -- Таблица для сбора ошибок
+
         CREATE TABLE error_log (
             id SERIAL PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -499,19 +449,13 @@ class DatabaseRecreator:
         CREATE INDEX idx_biological_entity_id ON biological_entity(id);
         CREATE INDEX idx_geographical_entity_id ON geographical_entity(id);
         CREATE INDEX idx_map_content_id ON map_content(id);
-
         CREATE INDEX idx_map_content_geometry_gist ON map_content USING GIST(geometry);
         CREATE INDEX idx_entity_geo_entity ON entity_geo(entity_type, entity_id);
         CREATE INDEX idx_text_content_structured_data ON text_content USING GIN (structured_data);
-        
-        CREATE INDEX idx_text_content_embedding ON text_content 
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100);
         """
         self.execute_script(create_script)
 
     def recreate_database(self):
-        """Основной метод для пересоздания базы данных"""
         try:
             self.connect()
             self.drop_tables()
