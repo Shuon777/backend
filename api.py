@@ -62,7 +62,7 @@ slot_val = Slot_validator()
 init_redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
 
 current_dir = Path(__file__).parent
-embedding_model_path = str(current_dir / "embedding_models" / "BERTA")
+embedding_model_path = str(current_dir / "embedding_models" / "bge-m3")
 faiss_index_path = str(current_dir / "knowledge_base_scripts" / "Vector" / "faiss_index")
 search_service = SearchService(
     embedding_model_path=embedding_model_path,
@@ -2033,7 +2033,7 @@ def get_object_description():
     object_type = request.args.get("object_type", "all")
     save_prompt = request.args.get("save_prompt", "false").lower() == "true"
     in_stoplist = request.args.get("in_stoplist", "1")
-    
+    return_raw_documents = request.args.get("return_raw_documents", "false").lower() == "true"
     # НОВЫЕ ПАРАМЕТРЫ ДЛЯ FAISS
     force_vector_search = request.args.get("force_vector_search", "false").lower() == "true"
     vector_similarity_threshold = float(request.args.get("vector_similarity_threshold", "0.03"))
@@ -2226,7 +2226,7 @@ def get_object_description():
                 query=search_query,  # Используем search_query (clean_query или query)
                 object_type=object_type,
                 similarity_threshold=vector_similarity_threshold,
-                limit=search_limit
+                limit=context_limit
             )
             
             if faiss_results:
@@ -2332,7 +2332,7 @@ def get_object_description():
                     query=search_query,
                     object_type=object_type,
                     similarity_threshold=vector_similarity_threshold,
-                    limit=search_limit
+                    limit=context_limit
                 )
                 
                 if faiss_results:
@@ -2460,6 +2460,7 @@ def get_object_description():
         not_used_objects = []  # Объекты, не вошедшие в контекст GigaChat
 
         # Обработка use_gigachat_answer
+        # Обработка use_gigachat_answer
         if use_gigachat_answer:
             if not descriptions:
                 response = {"error": "Не найдено описаний для генерации ответа"}
@@ -2512,6 +2513,7 @@ def get_object_description():
             # ============================================================================
             
             # used_objects - объекты из контекста GigaChat (топ по релевантности)
+            used_objects = []
             for desc in context_descriptions:
                 if isinstance(desc, dict):
                     obj_info = {
@@ -2524,6 +2526,7 @@ def get_object_description():
                     used_objects.append(obj_info)
             
             # not_used_objects - объекты, не вошедшие в контекст GigaChat
+            not_used_objects = []
             remaining_descriptions = [desc for desc in descriptions_for_context if desc not in context_descriptions]
             for desc in remaining_descriptions:
                 if isinstance(desc, dict):
@@ -2535,6 +2538,116 @@ def get_object_description():
                         "search_source": "faiss_vector_store" if use_faiss_fallback else "relational_database"
                     }
                     not_used_objects.append(obj_info)
+            
+            # ============================================================================
+            # ПРОВЕРКА ПАРАМЕТРА return_raw_documents - ВОЗВРАЩАЕМ СЫРЫЕ ДОКУМЕНТЫ БЕЗ GIGACHAT
+            # ============================================================================
+            if return_raw_documents:
+                logger.info("📄 Возвращаем сырые документы без вызова GigaChat")
+                
+                # ИЗВЛЕКАЕМ ВСЕ external_id из безопасных описаний
+                external_ids = extract_all_external_ids(descriptions_for_context)
+                
+                # Форматируем безопасные описания с ПРАВИЛЬНЫМИ ЗАГОЛОВКАМИ
+                formatted_descriptions = []
+                for i, desc in enumerate(descriptions_for_context, 1):
+                    if isinstance(desc, dict):
+                        content = desc.get("content", "")
+                        similarity = desc.get("similarity")
+                        source = desc.get("source", "unknown")
+                        
+                        # ИЗВЛЕКАЕМ EXTERNAL_ID (только для данных)
+                        external_id = extract_external_id(desc)
+                        
+                        # ИСПОЛЬЗУЕМ ПРАВИЛЬНУЮ ФУНКЦИЮ ДЛЯ ЗАГОЛОВКА
+                        title = get_proper_title(desc, object_name, i)
+                        
+                        formatted_desc = {
+                            "id": i,
+                            "title": title,  # ПРАВИЛЬНЫЙ ЗАГОЛОВОК
+                            "content": content,
+                            "source": source,
+                            "feature_data": desc.get("feature_data", {}),
+                            "structured_data": desc.get("structured_data", {})
+                        }
+                        
+                        # ДОБАВЛЯЕМ EXTERNAL_ID В ДАННЫЕ
+                        if external_id:
+                            formatted_desc["external_id"] = external_id
+                        
+                        if similarity is not None:
+                            formatted_desc["similarity"] = round(similarity, 4)
+                            
+                        formatted_descriptions.append(formatted_desc)
+                    else:
+                        formatted_descriptions.append({
+                            "id": i,
+                            "title": get_proper_title(None, object_name, i),  # ЗАГОЛОВОК ПО УМОЛЧАНИЮ
+                            "content": desc,
+                            "source": "content"
+                        })
+
+                # Сортируем по similarity если есть
+                if all('similarity' in desc for desc in formatted_descriptions):
+                    formatted_descriptions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+
+                response_data = {
+                    "count": len(formatted_descriptions),
+                    "descriptions": formatted_descriptions,
+                    "external_id": external_ids,  # ДОБАВЛЯЕМ ДЛЯ ФРОНТЕНДА
+                    "external_ids": external_ids,  # Дублируем для обратной совместимости
+                    "query_used": query if query else "simple_search",
+                    "clean_query_used": clean_query if clean_query else None,  # Добавляем информацию об очищенном запросе
+                    "similarity_threshold": similarity_threshold if query else None,
+                    "use_gigachat_filter": use_gigachat_filter,
+                    "use_gigachat_answer": True,
+                    "raw_documents": True,  # Пометка, что это сырые документы
+                    "message": "Возвращены исходные документы (GigaChat пропущен по запросу return_raw_documents)",
+                    "formatted": True,
+                    "in_stoplist_filter_applied": True,
+                    "in_stoplist_level": in_stoplist,
+                    # ДОБАВЛЯЕМ ОБЪЕКТЫ
+                    "used_objects": used_objects,
+                    "not_used_objects": not_used_objects
+                }
+
+                if object_name:
+                    response_data["object_name"] = object_name
+                    response_data["object_type"] = object_type
+
+                if filter_data:
+                    response_data["filters_applied"] = filter_data
+
+                # Добавляем информацию о разрешении синонимов
+                if resolved_object_info and resolved_object_info.get("resolved", False):
+                    response_data["synonym_resolution"] = {
+                        "original_name": resolved_object_info["original_name"],
+                        "resolved_name": object_name,
+                        "original_type": resolved_object_info.get("original_type", object_type)
+                    }
+
+                # ДОБАВЛЯЕМ ИНФОРМАЦИЮ О FAISS
+                if use_faiss_fallback:
+                    response_data["search_source"] = "faiss_vector_store"
+                    response_data["vector_similarity_threshold"] = vector_similarity_threshold
+                    response_data["faiss_fallback_used"] = True
+                    response_data["faiss_search_query"] = search_query
+                    response_data["clean_query_for_faiss"] = clean_query if clean_query else None
+
+                if debug_mode:
+                    response_data["debug"] = debug_info
+                    response_data["debug"]["gigachat_generation"] = {
+                        "skipped": True,
+                        "reason": "return_raw_documents",
+                        "prompt_saved": save_prompt,
+                        "external_ids_found": len(external_ids)
+                    }
+
+                return jsonify(response_data)
+            
+            # ============================================================================
+            # ОБЫЧНАЯ ГЕНЕРАЦИЯ ОТВЕТА GIGACHAT (ЕСЛИ return_raw_documents = False)
+            # ============================================================================
             
             # Объединяем топ безопасных описаний в контекст
             context = "\n\n".join([
@@ -2725,7 +2838,7 @@ def get_object_description():
                         
                         if external_id:
                             desc_summary["external_id"] = external_id
-                                
+                            
                         source_descriptions_summary.append(desc_summary)
 
                 response_data = {
@@ -2795,7 +2908,6 @@ def get_object_description():
                     debug_info["gigachat_error"] = str(e)
                     error_response["debug"] = debug_info
                 return jsonify(error_response), 500
-
         # ============================================================================
         # ФОРМИРОВАНИЕ СПИСКОВ ОБЪЕКТОВ ДЛЯ СЦЕНАРИЯ БЕЗ GIGACHAT
         # ============================================================================

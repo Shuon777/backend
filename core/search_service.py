@@ -17,6 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+    
 class SearchService:
     def __init__(
         self, 
@@ -37,8 +44,12 @@ class SearchService:
         self.embedding_model = HuggingFaceEmbeddings(
             model_name=embedding_model_path,
             model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': False}
+            encode_kwargs={'normalize_embeddings': True}
         )
+        self.reranker_model_name = "DiTy/cross-encoder-russian-msmarco"
+        self.reranker_local_path = str(Path(__file__).parent.parent / "embedding_models" / "rerankers" / "DiTy_cross-encoder-russian-msmarco")
+        self.reranker = None
+        
         self.object_synonyms = {}
         self.reverse_object_synonyms = {}
         
@@ -50,11 +61,40 @@ class SearchService:
         
         # Инициализация зависимостей
         self._init_dependencies()
+        self._load_reranker()
         
         # Загрузка данных для FAISS
         if faiss_index_path:
             self._load_resources_data()
-    
+            
+    def _load_reranker(self):
+        """Ленивая загрузка модели реранкера (только при наличии GPU)"""
+        if self.reranker is None:
+            try:
+                from sentence_transformers import CrossEncoder
+
+                # Проверяем наличие CUDA
+                cuda_available = False
+                if TORCH_AVAILABLE:
+                    cuda_available = torch.cuda.is_available()
+                    if cuda_available:
+                        logger.info("🔄 CUDA доступна, реранкер будет загружен на GPU")
+                    else:
+                        logger.info("⚠️ CUDA не обнаружена, реранкер отключён (используется только FAISS)")
+                        return None
+                else:
+                    logger.info("⚠️ Torch не установлен, реранкер отключён")
+                    return None
+
+                # Загружаем модель на GPU
+                logger.info(f"🔄 Загрузка модели реранкера: {self.reranker_model_name}")
+                self.reranker = CrossEncoder(self.reranker_local_path, device='cuda')
+                logger.info("✅ Модель реранкера загружена на GPU")
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки реранкера: {str(e)}")
+                self.reranker = None
+        return self.reranker
+
     def _init_dependencies(self):
         """Инициализирует зависимости чтобы избежать циклического импорта"""
         from core.relational_service import RelationalService
@@ -138,45 +178,37 @@ class SearchService:
             logger.error(f"Ошибка загрузки FAISS индекса: {str(e)}")
             return None
     
-    def search_in_faiss(self, query: str, k: int = 10, similarity_threshold: float = 0.8) -> List[Dict]:
+    def search_in_faiss(self, query: str, k: int = 20, similarity_threshold: float = 0.5) -> List[Dict]:
         """
-        Выполняет поиск в FAISS индексе по запросу
+        Выполняет поиск в FAISS индексе по запросу с использованием inner product
         
         Args:
             query: Поисковый запрос
-            k: Количество результатов
+            k: Количество результатов из FAISS (top-k)
             similarity_threshold: Порог схожести (0.0-1.0)
             
         Returns:
             Список найденных документов с метаданными
         """
+        # Загружаем FAISS индекс если нужно
         if not self.faiss_vectorstore:
             if not self.load_faiss_index():
                 logger.warning("FAISS индекс не загружен")
                 return []
         
         try:
-            # Выполняем поиск в FAISS
+            # Выполняем поиск в FAISS с inner product (чем больше score, тем лучше)
             results = self.faiss_vectorstore.similarity_search_with_score(query, k=k)
-            
-            # ФИКС: Преобразуем все numpy.float32 в обычные float
-            def convert_floats(obj):
-                if isinstance(obj, dict):
-                    return {k: convert_floats(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_floats(item) for item in obj]
-                elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
-                    return float(obj)
-                return obj
             
             # Фильтруем по порогу схожести и преобразуем в нужный формат
             filtered_results = []
             
             for doc, score in results:
-                similarity = 1 - score  # Преобразуем расстояние в схожесть
+                # Для inner product с нормализованными векторами score = косинусное сходство
+                similarity = float(score)  # Преобразуем numpy.float32 в float
                 
-                # Преобразуем similarity к float
-                similarity = float(similarity)
+                # Логируем для отладки
+                logger.debug(f"FAISS результат: similarity={similarity:.4f}, порог={similarity_threshold}")
                 
                 if similarity >= similarity_threshold:
                     # Извлекаем полный документ по resource_id из метаданных
@@ -184,6 +216,11 @@ class SearchService:
                     full_document = self._get_full_document(resource_id, doc.page_content)
                     
                     if full_document:
+                        # Получаем информацию о чанке
+                        chunk_index = doc.metadata.get('chunk_index', 0)
+                        total_chunks = doc.metadata.get('total_chunks', 1)
+                        
+                        # Формируем результат
                         result = {
                             'content': full_document,
                             'similarity': similarity,
@@ -194,15 +231,35 @@ class SearchService:
                                 'in_stoplist': doc.metadata.get('in_stoplist', 1),
                                 'source': doc.metadata.get('source', '')
                             },
-                            'metadata': convert_floats(doc.metadata)  # Преобразуем метаданные
+                            'metadata': {
+                                'resource_id': resource_id,
+                                'chunk_index': chunk_index,
+                                'total_chunks': total_chunks,
+                                'common_name': doc.metadata.get('common_name', ''),
+                                'scientific_name': doc.metadata.get('scientific_name', ''),
+                                'resource_type': doc.metadata.get('resource_type', 'unknown')
+                            }
                         }
+                        
+                        # Добавляем информацию о том, что это часть документа
+                        if total_chunks > 1:
+                            result['chunk_info'] = f"Часть {chunk_index + 1} из {total_chunks}"
+                        
                         filtered_results.append(result)
             
-            logger.info(f"FAISS поиск: найдено {len(filtered_results)} документов с порогом {similarity_threshold}")
+            # Сортируем по убыванию схожести (inner product уже отсортирован, но на всякий случай)
+            filtered_results.sort(key=lambda x: x['similarity'], reverse=True)
+            
+            logger.info(f"✅ FAISS поиск: найдено {len(filtered_results)} документов из {len(results)} с порогом {similarity_threshold}")
+            
+            # Логируем первые несколько результатов для отладки
+            for i, res in enumerate(filtered_results[:10]):
+                logger.debug(f"  {i+1}. {res['object_name']} (схожесть: {res['similarity']:.4f})")
+            
             return filtered_results
             
         except Exception as e:
-            logger.error(f"Ошибка поиска в FAISS: {str(e)}")
+            logger.error(f"❌ Ошибка поиска в FAISS: {str(e)}", exc_info=True)
             return []
         
     def _normalize_object_type(self, object_type: str) -> str:
@@ -310,47 +367,90 @@ class SearchService:
         return "\n\n".join(sections)
     
     def vector_search_fallback(self, query: str, object_type: str = "all", 
-                          similarity_threshold: float = 0.8, 
-                          limit: int = 10) -> List[Dict]:
+                           similarity_threshold: float = 0.5, limit: int = 5,
+                           rerank_top_k: int = 10) -> List[Dict]:
         """
-        Fallback метод для векторного поиска когда реляционный поиск не дал результатов
+        Fallback метод для векторного поиска с реранком (как в ноутбуке)
         
         Args:
-            query: Поисковый запрос (clean_query если передан, иначе оригинальный)
+            query: Поисковый запрос
             object_type: Тип объекта для фильтрации
-            similarity_threshold: Порог схожести
-            limit: Лимит результатов
+            similarity_threshold: Порог схожести для FAISS
+            limit: Количество результатов после реранка (top-5)
+            rerank_top_k: Количество результатов из FAISS для реранка (top-20)
             
         Returns:
-            Список найденных документов
+            Список найденных документов после реранка
         """
-        # Загружаем FAISS индекс если нужно
-        if not self.load_faiss_index():
+        # 1. Получаем топ-k из FAISS
+        faiss_results = self.search_in_faiss(
+            query=query, 
+            k=rerank_top_k, 
+            similarity_threshold=similarity_threshold
+        )
+        
+        if not faiss_results:
+            logger.info("❌ FAISS fallback: нет результатов")
             return []
         
-        # Выполняем поиск в FAISS
-        faiss_results = self.search_in_faiss(query, k=limit*2, similarity_threshold=similarity_threshold)
+        logger.info(f"🔍 FAISS fallback: получено {len(faiss_results)} результатов для реранка")
         
+        # 2. Применяем реранкер как в ноутбуке
+        try:
+            reranker = self._load_reranker()
+            if reranker:
+                # Подготавливаем пары [запрос, текст] для реранкера
+                pairs = [[query, r['content']] for r in faiss_results]
+                
+                # Получаем оценки реранкера
+                rerank_scores = reranker.predict(pairs, batch_size=32)
+                
+                # Сортируем по убыванию скоров реранкера
+                reranked = sorted(zip(faiss_results, rerank_scores), 
+                                key=lambda x: x[1], reverse=True)
+                
+                # Извлекаем результаты
+                reranked_results = [r for r, _ in reranked]
+                
+                logger.info(f"✅ Реранкер применил оценки к {len(reranked_results)} документам")
+                
+                # Логируем изменения в топе
+                if len(faiss_results) > 0 and len(reranked_results) > 0:
+                    logger.debug(f"  До реранка: {faiss_results[0]['object_name']} ({faiss_results[0]['similarity']:.4f})")
+                    logger.debug(f"  После реранка: {reranked_results[0]['object_name']}")
+            else:
+                logger.warning("⚠️ Реранкер не загружен, используем результаты FAISS без реранка")
+                reranked_results = faiss_results
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка при реранке: {str(e)}")
+            # Если реранкер не сработал, используем исходные результаты
+            reranked_results = faiss_results
         
-        # Фильтруем по типу объекта если указан
+        # 3. Фильтруем по типу объекта если указан
         if object_type != "all":
-            filtered_results = []
             target_type = self._normalize_object_type(object_type)
+            filtered_by_type = []
             
-            for result in faiss_results:
+            for result in reranked_results:
                 result_type = result.get('object_type', '').lower()
                 if result_type == target_type.lower():
-                    filtered_results.append(result)
+                    filtered_by_type.append(result)
                 elif target_type.lower() == 'biological_entity' and result_type in ['biological_entity', 'объект флоры', 'объект фауны']:
-                    filtered_results.append(result)
+                    filtered_by_type.append(result)
                 elif target_type.lower() == 'geographical_entity' and result_type in ['geographical_entity', 'географический объект']:
-                    filtered_results.append(result)
+                    filtered_by_type.append(result)
             
-            faiss_results = filtered_results
+            reranked_results = filtered_by_type
+            logger.info(f"📊 После фильтрации по типу '{object_type}': {len(reranked_results)} результатов")
         
-        # Применяем лимит
-        return faiss_results[:limit]
-    
+        # 4. Возвращаем топ-limit
+        final_results = reranked_results[:limit]
+        
+        logger.info(f"🎯 FAISS fallback: возвращаем {len(final_results)} результатов (порог: {similarity_threshold}, реранк: {rerank_top_k}->{limit})")
+        
+        return final_results
+
     def _load_object_synonyms(self):
         """Загружает синонимы объектов из JSON файла"""
         base_dir = Path(__file__).parent.parent
