@@ -1,87 +1,129 @@
+"""Main entry point for database importer."""
+
 import sys
 import argparse
-import logging
-import traceback
 import json
 from pathlib import Path
+
+# Исправляем на относительные импорты
 from .config import DatabaseConfig
-from .postgres_client import PostgresClient
-from .schema_repository import PostgresSchemaRepository
-from .importer import EcoAssistantImporter
+from .adapters import (
+    PostgresClient,
+    PostgresResourceRepository,
+    PostgresObjectDescriptionRepository,
+    PostgresPropertyValueRepository,
+    PostgresModalityRepository,
+    PostgresBibliographicRepository,
+    PostgresGenerationRepository,
+    PostgresSupportMetadataRepository,
+    PostgresSchemaRepository,
+)
+from .services import JsonSpeciesNormalizer
+from .use_cases import ImportResourceUseCase, BatchImportUseCase
+from .infrastructure.logging_setup import setup_logging
 
 
-def setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('db_importer.log', encoding='utf-8')
-        ]
+def create_use_cases(config: DatabaseConfig, synonyms_path: Path):
+    """Factory function to create use cases with dependencies."""
+    
+    client = PostgresClient(config)
+    client.connect()
+    
+    # Create repositories
+    resource_repo = PostgresResourceRepository(client)
+    object_repo = PostgresObjectDescriptionRepository(client)
+    property_value_repo = PostgresPropertyValueRepository(client)
+    modality_repo = PostgresModalityRepository(client)
+    bibliographic_repo = PostgresBibliographicRepository(client)
+    generation_repo = PostgresGenerationRepository(client)
+    metadata_repo = PostgresSupportMetadataRepository(client)
+    
+    # Create services
+    species_normalizer = JsonSpeciesNormalizer(synonyms_path)
+    
+    # Create use cases
+    import_resource = ImportResourceUseCase(
+        resource_repo=resource_repo,
+        object_repo=object_repo,
+        property_value_repo=property_value_repo,
+        modality_repo=modality_repo,
+        bibliographic_repo=bibliographic_repo,
+        generation_repo=generation_repo,
+        metadata_repo=metadata_repo,
+        species_normalizer=species_normalizer
     )
+    
+    batch_import = BatchImportUseCase(import_resource)
+    
+    return client, batch_import
 
 
-def main():
+def recreate_schema(client: PostgresClient, schema_file: Path) -> None:
+    """Recreate database schema."""
+    repo = PostgresSchemaRepository(client, schema_file)
+    repo.drop_all()
+    repo.create_all()
+
+
+def main() -> None:
+    """Main entry point."""
     parser = argparse.ArgumentParser(description='Database importer for eco_assistant schema')
     parser.add_argument('--full', action='store_true', help='Drop and recreate schema')
     parser.add_argument('--incremental', action='store_true', help='Import incrementally (skip duplicates)')
     parser.add_argument('--json-file', default='../../json_files/resources_dist.json', help='Path to JSON resources')
+    parser.add_argument('--synonyms-file', default='json_files/object_synonyms.json', help='Path to synonyms file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('--error-log', default='import_errors.log', help='File to log errors')
     args = parser.parse_args()
-
-    setup_logging(args.verbose)
-    logger = logging.getLogger(__name__)
     
-    error_logger = logging.getLogger('errors')
-    error_handler = logging.FileHandler(args.error_log, encoding='utf-8')
-    error_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    error_logger.addHandler(error_handler)
-    error_logger.setLevel(logging.ERROR)
-
+    # Setup logging
+    setup_logging(verbose=args.verbose, error_log=args.error_log)
+    
     config = DatabaseConfig.from_env()
-    client = PostgresClient(config)
+    client = None
     
     try:
-        client.connect()
-        logger.info("Connected to database successfully")
-
-        if args.full:
-            logger.info("Starting full schema recreation")
-            schema_file = Path(__file__).parent / 'schema.sql'
-            if not schema_file.exists():
-                logger.error(f"Schema file not found: {schema_file}")
-                sys.exit(1)
-            repo = PostgresSchemaRepository(client, schema_file)
-            repo.drop_all()
-            repo.create_all()
-            logger.info("Schema recreated successfully")
-
-        logger.info(f"Starting import from {args.json_file}")
-        importer = EcoAssistantImporter(client)
+        # Convert paths
+        synonyms_path = Path(args.synonyms_file)
+        schema_file = Path(__file__).parent / 'schema.sql'
         
+        if not schema_file.exists():
+            print(f"Error: Schema file not found: {schema_file}", file=sys.stderr)
+            sys.exit(1)
+        
+        # Create use cases
+        client, batch_import = create_use_cases(config, synonyms_path)
+        
+        # Recreate schema if requested
+        if args.full:
+            print("Recreating schema...")
+            recreate_schema(client, schema_file)
+            print("Schema recreated successfully")
+        
+        # Load resources
+        print(f"Loading resources from {args.json_file}")
         with open(args.json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        
         resources = data.get('resources', [])
+        print(f"Total resources to process: {len(resources)}")
         
-        logger.info(f"Total resources to process: {len(resources)}")
+        # Import
+        print(f"Starting import, incremental={args.incremental}")
+        result = batch_import.execute(resources, incremental=args.incremental)
         
-        result = importer.import_resources(args.json_file, incremental=args.incremental)
+        print(f"Import completed: {result.to_dict()}")
         
-        logger.info(f"Import completed: {result}")
-        
-        if result['errors'] > 0:
-            logger.warning(f"Failed to import {result['errors']} resources")
-            logger.info(f"Check {args.error_log} for details")
-            
+        if result.error_count > 0:
+            print(f"Warning: Failed to import {result.error_count} resources", file=sys.stderr)
+            print(f"Check {args.error_log} for details", file=sys.stderr)
+    
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        logger.error(traceback.format_exc())
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        client.disconnect()
-        logger.info("Disconnected from database")
+        if client:
+            client.disconnect()
 
 
 if __name__ == '__main__':
