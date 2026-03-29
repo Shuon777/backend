@@ -19,7 +19,7 @@ class EcoAssistantImporter(ResourceImporter):
         self._error_logger = logging.getLogger('errors')
         self._geodb_data = self._load_geodb()
         self._species_synonyms = self._load_species_synonyms()
-        self._object_cache = {}
+        self._object_description_cache = {}  # cache by (canonical_id, object_type)
         self._property_value_cache = {}
         self._modality_cache = {}
         self._bibliographic_cache = {}
@@ -118,9 +118,9 @@ class EcoAssistantImporter(ResourceImporter):
                     success += 1
                     if incremental:
                         row = self._client.fetchone(
-                        "SELECT support_metadata_id FROM eco_assistant.resource WHERE id = %s",
-                        (result,)
-                    )
+                            "SELECT support_metadata_id FROM eco_assistant.resource WHERE id = %s",
+                            (result,)
+                        )
                         if row:
                             self._store_resource_hash(row[0], r_hash)
                     self._logger.debug(f"Successfully imported: {resource_id} -> {result}")
@@ -138,6 +138,12 @@ class EcoAssistantImporter(ResourceImporter):
         self._logger.info(f"Import finished. Success: {success}, Skipped: {skipped}, Errors: {errors}")
         return {'success': success, 'skipped': skipped, 'errors': errors}
 
+    def _generate_canonical_id(self, name: str, object_type: str) -> str:
+        """Generate a canonical ID from name and type for fast lookup"""
+        normalized_name = name.strip().lower()
+        combined = f"{normalized_name}|{object_type}"
+        return hashlib.md5(combined.encode('utf-8')).hexdigest()
+
     def _normalize_species_name(self, name: str) -> str:
         if not name:
             return name
@@ -150,35 +156,57 @@ class EcoAssistantImporter(ResourceImporter):
                     return main_name
         return name
 
-    def _get_or_create_object(self, name: str, object_type: str, classification_identifier: Optional[str] = None) -> int:
-        cache_key = (name, object_type)
-        if cache_key in self._object_cache:
-            return self._object_cache[cache_key]
+    def _get_or_create_object_description(self, canonical_name: str, object_type: str, 
+                                          classification_identifier: Optional[str] = None,
+                                          primary_synonym: Optional[str] = None) -> int:
+        """Get or create object description by canonical_id"""
+        canonical_id = self._generate_canonical_id(canonical_name, object_type)
+        cache_key = (canonical_id, object_type)
+        
+        if cache_key in self._object_description_cache:
+            return self._object_description_cache[cache_key]
 
+        # Try to find existing object_description
         row = self._client.fetchone(
-            "SELECT o.id FROM eco_assistant.object o "
-            "JOIN eco_assistant.object_description od ON o.id = od.object_id "
-            "WHERE o.name = %s AND od.object_type = %s",
-            (name, object_type)
+            "SELECT id FROM eco_assistant.object_description WHERE canonical_id = %s AND object_type = %s",
+            (canonical_id, object_type)
         )
+        
         if row:
-            obj_id = row[0]
-            self._object_cache[cache_key] = obj_id
-            return obj_id
+            obj_desc_id = row[0]
+            self._object_description_cache[cache_key] = obj_desc_id
+            
+            # Ensure primary synonym exists
+            if primary_synonym:
+                self._add_object_synonym(obj_desc_id, primary_synonym, 'ru', is_primary=True)
+            
+            return obj_desc_id
 
+        # Create new object_description
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.object (name) VALUES (%s) RETURNING id",
-            (name,)
-        )
-        obj_id = row[0]
-        self._client.fetchone(
-            "INSERT INTO eco_assistant.object_description (object_id, classification_identifier, object_type) "
+            "INSERT INTO eco_assistant.object_description (canonical_id, object_type, classification_identifier) "
             "VALUES (%s, %s, %s) RETURNING id",
-            (obj_id, classification_identifier, object_type)
+            (canonical_id, object_type, classification_identifier)
+        )
+        obj_desc_id = row[0]
+        
+        # Add primary synonym
+        if primary_synonym:
+            self._add_object_synonym(obj_desc_id, primary_synonym, 'ru', is_primary=True)
+        
+        self._client.commit()
+        self._object_description_cache[cache_key] = obj_desc_id
+        return obj_desc_id
+
+    def _add_object_synonym(self, object_description_id: int, synonym: str, language: str = 'ru', 
+                           is_primary: bool = False) -> None:
+        """Add a synonym to an object description"""
+        self._client.execute(
+            "INSERT INTO eco_assistant.object_synonym (object_description_id, synonym, language, is_primary) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (object_description_id, synonym, language) DO NOTHING",
+            (object_description_id, synonym, language, is_primary)
         )
         self._client.commit()
-        self._object_cache[cache_key] = obj_id
-        return obj_id
 
     def _get_or_create_property_value(self, value: str) -> int:
         if value in self._property_value_cache:
@@ -202,34 +230,14 @@ class EcoAssistantImporter(ResourceImporter):
         self._property_value_cache[value] = pv_id
         return pv_id
     
-    def _add_object_property(self, object_id: int, object_type: str, property_name: str, value: str) -> None:
-        row = self._client.fetchone(
-            "SELECT id FROM eco_assistant.object_description WHERE object_id = %s AND object_type = %s",
-            (object_id, object_type)
-        )
-        if not row:
-            return
-        desc_id = row[0]
+    def _add_object_property(self, object_description_id: int, object_type: str, 
+                            property_name: str, value: str) -> None:
+        """Add a property to an object description"""
         pv_id = self._get_or_create_property_value(value)
         self._client.execute(
             "INSERT INTO eco_assistant.object_property (object_description_id, property_name, object_type, property_value_id) "
             "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            (desc_id, property_name, object_type, pv_id)
-        )
-        self._client.commit()
-
-    def _add_object_synonym(self, object_id: int, object_type: str, synonym: str, language: str = 'ru') -> None:
-        row = self._client.fetchone(
-            "SELECT id FROM eco_assistant.object_description WHERE object_id = %s AND object_type = %s",
-            (object_id, object_type)
-        )
-        if not row:
-            return
-        desc_id = row[0]
-        self._client.execute(
-            "INSERT INTO eco_assistant.object_synonym (object_description_id, synonym, language) "
-            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-            (desc_id, synonym, language)
+            (object_description_id, property_name, object_type, pv_id)
         )
         self._client.commit()
 
@@ -346,19 +354,14 @@ class EcoAssistantImporter(ResourceImporter):
         self._client.commit()
         return resource_id
 
-    def _link_resource_to_object(self, resource_id: int, object_id: int, object_type: str) -> None:
-        row = self._client.fetchone(
-            "SELECT id FROM eco_assistant.object_description WHERE object_id = %s AND object_type = %s",
-            (object_id, object_type)
+    def _link_resource_to_object(self, resource_id: int, object_description_id: int) -> None:
+        """Link resource to object description"""
+        self._client.execute(
+            "INSERT INTO eco_assistant.resource_object (resource_id, object_description_id) "
+            "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (resource_id, object_description_id)
         )
-        if row:
-            desc_id = row[0]
-            self._client.execute(
-                "INSERT INTO eco_assistant.resource_object (resource_id, object_description_id) "
-                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (resource_id, desc_id)
-            )
-            self._client.commit()
+        self._client.commit()
 
     def _resource_exists(self, resource_hash: str) -> bool:
         row = self._client.fetchone(
@@ -496,20 +499,22 @@ class EcoAssistantImporter(ResourceImporter):
         geo_synonyms = resource.get('geo_synonyms', [])
         in_stoplist = resource.get('in_stoplist', False)
 
-        object_id = self._get_or_create_object(common_name, object_type, None)
+        object_description_id = self._get_or_create_object_description(
+            common_name, object_type, None, primary_synonym=common_name
+        )
 
         if description:
-            self._add_object_property(object_id, object_type, 'описание', description)
+            self._add_object_property(object_description_id, object_type, 'описание', description)
 
         if coordinates:
             lat = self._clean_coordinate(coordinates.get('latitude'))
             lon = self._clean_coordinate(coordinates.get('longitude'))
             if lat is not None and lon is not None:
-                self._add_object_property(object_id, object_type, 'координаты', f"{lat}, {lon}")
+                self._add_object_property(object_description_id, object_type, 'координаты', f"{lat}, {lon}")
 
         for synonym in geo_synonyms:
             if synonym and synonym != common_name:
-                self._add_object_synonym(object_id, object_type, synonym)
+                self._add_object_synonym(object_description_id, synonym)
 
         author = resource.get('access_options', {}).get('author')
         source = name_info.get('source')
@@ -543,7 +548,7 @@ class EcoAssistantImporter(ResourceImporter):
                 self._missing_geometry_objects.add(common_name)
 
         resource_id = self._create_resource(modality_id, bibliographic_id, generation_id, support_metadata_id)
-        self._link_resource_to_object(resource_id, object_id, object_type)
+        self._link_resource_to_object(resource_id, object_description_id)
 
         return resource_id
 
@@ -573,14 +578,16 @@ class EcoAssistantImporter(ResourceImporter):
             common_name = self._normalize_species_name(common_name)
 
         object_type = information_subtype or 'Биологический объект'
-        object_id = self._get_or_create_object(common_name, object_type, None)
+        object_description_id = self._get_or_create_object_description(
+            common_name, object_type, None, primary_synonym=common_name
+        )
 
         if scientific_name:
-            self._add_object_synonym(object_id, object_type, scientific_name, 'la')
+            self._add_object_synonym(object_description_id, scientific_name, 'la')
 
         for synonym in geo_synonyms:
             if synonym:
-                self._add_object_synonym(object_id, object_type, synonym)
+                self._add_object_synonym(object_description_id, synonym)
 
         author = resource.get('access_options', {}).get('author')
         source = name_info.get('source')
@@ -611,7 +618,7 @@ class EcoAssistantImporter(ResourceImporter):
                 break
 
         resource_id = self._create_resource(modality_id, bibliographic_id, generation_id, support_metadata_id)
-        self._link_resource_to_object(resource_id, object_id, object_type)
+        self._link_resource_to_object(resource_id, object_description_id)
 
         return resource_id
 
@@ -627,14 +634,16 @@ class EcoAssistantImporter(ResourceImporter):
         geo_synonyms = resource.get('geo_synonyms', [])
 
         object_type = information_type or 'Текстовый ресурс'
-        object_id = self._get_or_create_object(title, object_type, None)
+        object_description_id = self._get_or_create_object_description(
+            title, object_type, None, primary_synonym=title
+        )
 
         if brief_annotation:
-            self._add_object_property(object_id, object_type, 'аннотация', brief_annotation)
+            self._add_object_property(object_description_id, object_type, 'аннотация', brief_annotation)
 
         for synonym in geo_synonyms:
             if synonym:
-                self._add_object_synonym(object_id, object_type, synonym)
+                self._add_object_synonym(object_description_id, synonym)
 
         author = resource.get('access_options', {}).get('author')
         source = name_info.get('source')
@@ -664,7 +673,7 @@ class EcoAssistantImporter(ResourceImporter):
         self._create_modality_text(modality_id, text_content)
 
         resource_id = self._create_resource(modality_id, bibliographic_id, generation_id, support_metadata_id)
-        self._link_resource_to_object(resource_id, object_id, object_type)
+        self._link_resource_to_object(resource_id, object_description_id)
 
         return resource_id
 
@@ -711,9 +720,12 @@ class EcoAssistantImporter(ResourceImporter):
             common_name = self._normalize_species_name(common_name)
 
         object_type = information_subtype or information_type
-        object_id = None
+        object_description_id = None
+        
         if common_name:
-            object_id = self._get_or_create_object(common_name, object_type, None)
+            object_description_id = self._get_or_create_object_description(
+                common_name, object_type, None, primary_synonym=common_name
+            )
 
         author = access_options.get('author') or feature_photo.get('author_photo')
         source = name_info.get('source')
@@ -745,26 +757,26 @@ class EcoAssistantImporter(ResourceImporter):
 
         resource_id = self._create_resource(modality_id, bibliographic_id, generation_id, support_metadata_id)
 
-        if object_id and common_name:
-            self._link_resource_to_object(resource_id, object_id, object_type)
+        if object_description_id and common_name:
+            self._link_resource_to_object(resource_id, object_description_id)
 
         classification_info = feature_photo.get('classification_info', {})
-        if classification_info:
+        if classification_info and object_description_id:
             result_info = classification_info.get('result', {})
             for key, value in result_info.items():
                 if value and key not in ['source']:
-                    self._add_object_property(object_id, object_type, key, str(value))
+                    self._add_object_property(object_description_id, object_type, key, str(value))
 
         weather_text, weather_data = self._process_weather_for_image(feature_photo)
-        if weather_text:
-            self._add_object_property(object_id, object_type, 'погодные условия', weather_text)
+        if weather_text and object_description_id:
+            self._add_object_property(object_description_id, object_type, 'погодные условия', weather_text)
 
         location = feature_photo.get('location', {})
-        if location:
+        if location and object_description_id:
             lat = self._clean_coordinate(location.get('latitude'))
             lon = self._clean_coordinate(location.get('longitude'))
             if lat is not None and lon is not None:
-                self._add_object_property(object_id, object_type, 'координаты', f"{lat}, {lon}")
+                self._add_object_property(object_description_id, object_type, 'координаты', f"{lat}, {lon}")
 
         return resource_id
 

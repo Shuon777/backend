@@ -14,45 +14,38 @@ CREATE SCHEMA IF NOT EXISTS eco_assistant;
 -- ============================================================
 
 -- -----------------------------------------------
--- 1. Базовый объект (ИдентификаторБД)
--- -----------------------------------------------
-CREATE TABLE eco_assistant.object (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-COMMENT ON TABLE eco_assistant.object IS 'Базовый объект (ИдентификаторБД)';
-
--- -----------------------------------------------
--- 2. Описание связанного объекта
+-- 1. Описание объекта (основная сущность)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.object_description (
     id SERIAL PRIMARY KEY,
-    object_id INTEGER NOT NULL REFERENCES eco_assistant.object(id) ON DELETE CASCADE,
-    classification_identifier TEXT,
-    object_type TEXT NOT NULL,
+    canonical_id TEXT NOT NULL UNIQUE,        -- канонический идентификатор (например хеш) для быстрого поиска
+    object_type TEXT NOT NULL,                 -- тип объекта: ОФФ, геообъект, достопримечательность, услуги
+    classification_identifier TEXT,            -- идентификатор унифицированной классификации
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
-COMMENT ON TABLE eco_assistant.object_description IS 'Описание объекта: ИдентификаторБД (object_id), ИдентификаторСТ, Тип объекта';
-CREATE INDEX idx_obj_desc_object ON eco_assistant.object_description(object_id);
+COMMENT ON TABLE eco_assistant.object_description IS 'Описание объекта: канонический идентификатор, тип объекта, классификационный идентификатор';
+CREATE INDEX idx_obj_desc_canonical ON eco_assistant.object_description(canonical_id);
 CREATE INDEX idx_obj_desc_type ON eco_assistant.object_description(object_type);
+CREATE INDEX idx_obj_desc_class ON eco_assistant.object_description(classification_identifier);
 
 -- -----------------------------------------------
--- 3. Синонимы названия объекта
+-- 2. Синонимы названия объекта (все человекочитаемые имена)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.object_synonym (
     id SERIAL PRIMARY KEY,
     object_description_id INTEGER NOT NULL REFERENCES eco_assistant.object_description(id) ON DELETE CASCADE,
     synonym TEXT NOT NULL,
     language VARCHAR(10) DEFAULT 'ru',
+    is_primary BOOLEAN DEFAULT FALSE,         -- флаг основного/канонического имени
     UNIQUE(object_description_id, synonym, language)
 );
-COMMENT ON TABLE eco_assistant.object_synonym IS 'Синонимы названия объекта (множество)';
+COMMENT ON TABLE eco_assistant.object_synonym IS 'Синонимы названия объекта (все человекочитаемые имена)';
 CREATE INDEX idx_obj_syn ON eco_assistant.object_synonym(synonym);
+CREATE INDEX idx_obj_syn_primary ON eco_assistant.object_synonym(object_description_id) WHERE is_primary = TRUE;
 
 -- -----------------------------------------------
--- 4. Канонические значения свойств объектов
+-- 3. Канонические значения свойств объектов
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.property_value (
     id SERIAL PRIMARY KEY,
@@ -61,9 +54,10 @@ CREATE TABLE eco_assistant.property_value (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.property_value IS 'Канонические текстовые значения свойств';
+CREATE UNIQUE INDEX idx_property_value_md5 ON eco_assistant.property_value (value_md5);
 
 -- -----------------------------------------------
--- 5. Синонимы значений свойств
+-- 4. Синонимы значений свойств
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.property_value_synonym (
     id SERIAL PRIMARY KEY,
@@ -75,7 +69,7 @@ COMMENT ON TABLE eco_assistant.property_value_synonym IS 'Синонимы дл�
 CREATE INDEX idx_prop_val_syn ON eco_assistant.property_value_synonym(synonym);
 
 -- -----------------------------------------------
--- 6. Свойства объекта по типам
+-- 5. Свойства объекта
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.object_property (
     id SERIAL PRIMARY KEY,
@@ -93,7 +87,7 @@ CREATE INDEX idx_obj_prop_name_type ON eco_assistant.object_property(property_na
 CREATE INDEX idx_obj_prop_value ON eco_assistant.object_property(property_value_id);
 
 -- -----------------------------------------------
--- 7. Модальность ресурса (базовая)
+-- 6. Модальность ресурса (базовая)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.modality (
     id SERIAL PRIMARY KEY,
@@ -102,9 +96,10 @@ CREATE TABLE eco_assistant.modality (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.modality IS 'Базовая модальность ресурса';
+CREATE INDEX idx_modality_type ON eco_assistant.modality(modality_type);
 
 -- -----------------------------------------------
--- 8. Данные текстовой модальности
+-- 7. Данные текстовой модальности
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.modality_text (
     id SERIAL PRIMARY KEY,
@@ -117,7 +112,7 @@ COMMENT ON TABLE eco_assistant.modality_text IS 'Данные для текст�
 CREATE INDEX idx_modality_text ON eco_assistant.modality_text(modality_id);
 
 -- -----------------------------------------------
--- 9. Данные модальности "Изображение"
+-- 8. Данные модальности "Изображение"
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.modality_image (
     id SERIAL PRIMARY KEY,
@@ -136,7 +131,7 @@ COMMENT ON TABLE eco_assistant.modality_image IS 'Данные для модал
 CREATE INDEX idx_modality_image ON eco_assistant.modality_image(modality_id);
 
 -- -----------------------------------------------
--- 10. Данные модальности "Геоданные"
+-- 9. Данные модальности "Геоданные"
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.modality_geodata (
     id SERIAL PRIMARY KEY,
@@ -150,7 +145,7 @@ CREATE INDEX idx_modality_geodata_geom ON eco_assistant.modality_geodata USING G
 CREATE INDEX idx_modality_geodata ON eco_assistant.modality_geodata(modality_id);
 
 -- -----------------------------------------------
--- 11. Признак ресурса (словарь онтологии)
+-- 10. Признак ресурса (словарь онтологии)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.feature (
     id SERIAL PRIMARY KEY,
@@ -161,7 +156,7 @@ CREATE TABLE eco_assistant.feature (
 COMMENT ON TABLE eco_assistant.feature IS 'Словарь признаков ресурса (онтология)';
 
 -- -----------------------------------------------
--- 12. Библиографические данные
+-- 11. Библиографические данные
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.bibliographic (
     id SERIAL PRIMARY KEY,
@@ -176,7 +171,7 @@ CREATE TABLE eco_assistant.bibliographic (
 COMMENT ON TABLE eco_assistant.bibliographic IS 'Библиографические данные';
 
 -- -----------------------------------------------
--- 13. Данные о генерации
+-- 12. Данные о генерации
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.generation (
     id SERIAL PRIMARY KEY,
@@ -189,7 +184,7 @@ CREATE TABLE eco_assistant.generation (
 COMMENT ON TABLE eco_assistant.generation IS 'Данные о генерации';
 
 -- -----------------------------------------------
--- 14. Метаданные сопровождения
+-- 13. Метаданные сопровождения
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.support_metadata (
     id SERIAL PRIMARY KEY,
@@ -200,7 +195,7 @@ CREATE TABLE eco_assistant.support_metadata (
 COMMENT ON TABLE eco_assistant.support_metadata IS 'Метаданные сопровождения (параметры обработки)';
 
 -- -----------------------------------------------
--- 15. Ресурс (центральная сущность)
+-- 14. Ресурс (центральная сущность)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.resource (
     id SERIAL PRIMARY KEY,
@@ -212,9 +207,13 @@ CREATE TABLE eco_assistant.resource (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.resource IS 'Ресурс: объединяет модальность, статические метаданные и метаданные сопровождения';
+CREATE INDEX idx_resource_modality ON eco_assistant.resource(modality_id);
+CREATE INDEX idx_resource_bibliographic ON eco_assistant.resource(bibliographic_id);
+CREATE INDEX idx_resource_generation ON eco_assistant.resource(generation_id);
+CREATE INDEX idx_resource_support ON eco_assistant.resource(support_metadata_id);
 
 -- -----------------------------------------------
--- 16. Связь ресурса с описаниями объектов (многие ко многим)
+-- 15. Связь ресурса с описаниями объектов (многие ко многим)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.resource_object (
     resource_id INTEGER NOT NULL REFERENCES eco_assistant.resource(id) ON DELETE CASCADE,
@@ -224,7 +223,7 @@ CREATE TABLE eco_assistant.resource_object (
 COMMENT ON TABLE eco_assistant.resource_object IS 'Связь ресурса с множеством описаний объектов';
 
 -- -----------------------------------------------
--- 17. Связь ресурса с признаками (многие ко многим)
+-- 16. Связь ресурса с признаками (многие ко многим)
 -- -----------------------------------------------
 CREATE TABLE eco_assistant.resource_feature (
     resource_id INTEGER NOT NULL REFERENCES eco_assistant.resource(id) ON DELETE CASCADE,
@@ -236,25 +235,17 @@ COMMENT ON TABLE eco_assistant.resource_feature IS 'Связь ресурса с
 -- ============================================================
 -- Индексы для производительности
 -- ============================================================
--- Для поиска по названиям объектов с использованием триграмм
-CREATE INDEX idx_object_name_trgm ON eco_assistant.object USING GIN (name gin_trgm_ops);
+-- Для поиска по синонимам с использованием триграмм
 CREATE INDEX idx_object_synonym_trgm ON eco_assistant.object_synonym USING GIN (synonym gin_trgm_ops);
 
--- Основные индексы для связей и поиска
-CREATE INDEX idx_object_description_class ON eco_assistant.object_description(classification_identifier);
-CREATE INDEX idx_object_property_value ON eco_assistant.object_property(property_value_id);
-CREATE INDEX idx_modality_type ON eco_assistant.modality(modality_type);
-CREATE INDEX idx_resource_modality ON eco_assistant.resource(modality_id);
-CREATE INDEX idx_resource_bibliographic ON eco_assistant.resource(bibliographic_id);
-CREATE INDEX idx_resource_generation ON eco_assistant.resource(generation_id);
-CREATE INDEX idx_resource_support ON eco_assistant.resource(support_metadata_id);
-CREATE UNIQUE INDEX idx_property_value_md5 ON eco_assistant.property_value (value_md5);
 -- ============================================================
 -- Комментарии к колонкам для документации
 -- ============================================================
-COMMENT ON COLUMN eco_assistant.object_description.object_id IS 'ИдентификаторБД – ссылка на базовый объект';
+COMMENT ON COLUMN eco_assistant.object_description.canonical_id IS 'Канонический идентификатор (например хеш) для быстрого поиска, не показывается пользователю';
 COMMENT ON COLUMN eco_assistant.object_description.classification_identifier IS 'ИдентификаторСТ – идентификатор унифицированной классификации';
 COMMENT ON COLUMN eco_assistant.object_description.object_type IS 'Тип объекта: ОФФ, геообъект, достопримечательность, услуги';
+COMMENT ON COLUMN eco_assistant.object_synonym.synonym IS 'Человекочитаемое имя объекта';
+COMMENT ON COLUMN eco_assistant.object_synonym.is_primary IS 'Флаг основного/канонического имени для отображения пользователю';
 COMMENT ON COLUMN eco_assistant.modality.modality_type IS 'Тип модальности: Текст, Изображение, Геоданные, Аудио и т.д.';
 COMMENT ON COLUMN eco_assistant.modality_text.content IS 'Структурированный текст (JSON)';
 COMMENT ON COLUMN eco_assistant.modality_image.url IS 'Ссылка на изображение';
