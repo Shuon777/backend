@@ -1,13 +1,13 @@
-"""Adapters layer - database clients and repository implementations."""
-
 from .database_client import DatabaseClient, PostgresClient
 from .postgres_repositories import (
     PostgresResourceRepository,
-    PostgresObjectDescriptionRepository,
-    PostgresPropertyValueRepository,
+    PostgresObjectRepository,
+    PostgresObjectTypeRepository,
+    PostgresSynonymRepository,
     PostgresModalityRepository,
     PostgresBibliographicRepository,
-    PostgresGenerationRepository,
+    PostgresCreationRepository,
+    PostgresResourceStaticRepository,
     PostgresSupportMetadataRepository,
 )
 from .schema_repository import PostgresSchemaRepository
@@ -16,11 +16,13 @@ __all__ = [
     'DatabaseClient',
     'PostgresClient',
     'PostgresResourceRepository',
-    'PostgresObjectDescriptionRepository',
-    'PostgresPropertyValueRepository',
+    'PostgresObjectRepository',
+    'PostgresObjectTypeRepository',
+    'PostgresSynonymRepository',
     'PostgresModalityRepository',
     'PostgresBibliographicRepository',
-    'PostgresGenerationRepository',
+    'PostgresCreationRepository',
+    'PostgresResourceStaticRepository',
     'PostgresSupportMetadataRepository',
     'PostgresSchemaRepository',
 ]

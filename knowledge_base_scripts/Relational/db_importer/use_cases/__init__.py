@@ -3,11 +3,13 @@
 from .import_resource import ImportResourceUseCase, BatchImportUseCase
 from .interfaces import (
     ResourceRepository,
-    ObjectDescriptionRepository,
-    PropertyValueRepository,
+    ObjectRepository,
+    ObjectTypeRepository,
+    SynonymRepository,
     ModalityRepository,
     BibliographicRepository,
-    GenerationRepository,
+    CreationRepository,
+    ResourceStaticRepository,
     SupportMetadataRepository,
     SpeciesNameNormalizer,
     SchemaRepository
@@ -17,11 +19,13 @@ __all__ = [
     'ImportResourceUseCase',
     'BatchImportUseCase',
     'ResourceRepository',
-    'ObjectDescriptionRepository',
-    'PropertyValueRepository',
+    'ObjectRepository',
+    'ObjectTypeRepository',
+    'SynonymRepository',
     'ModalityRepository',
     'BibliographicRepository',
-    'GenerationRepository',
+    'CreationRepository',
+    'ResourceStaticRepository',
     'SupportMetadataRepository',
     'SpeciesNameNormalizer',
     'SchemaRepository'
