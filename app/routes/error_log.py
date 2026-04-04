@@ -44,7 +44,7 @@ def log_error():
         context = data.get("context", {})
         additional_info = data.get("additional_info", {})
         
-        logger.info(f"📝 Логирование ошибки: {error_message[:100]}...")
+        logger.info(f"📝 Логирование ошибки: {error_message}...")
         
         # Используем RelationalService для записи в базу
         success, error_id, message = relational_service.log_error_to_db(

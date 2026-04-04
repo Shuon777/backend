@@ -10,7 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from typing import Any, List, Dict, Optional
-from infrastructure.llm_integration import get_gigachat
+from infrastructure.llm_integration import get_llm
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 class RelationalService:
     def __init__(self):
-        self.llm = get_gigachat()
+        self.llm = get_llm()
         self.db_config = {
             "dbname": os.getenv("DB_NAME", "eco"),
             "user": os.getenv("DB_USER", "postgres"),

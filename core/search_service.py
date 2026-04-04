@@ -10,6 +10,7 @@ import json
 import time
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from shapely.geometry import shape, mapping
+from infrastructure.llm_integration import get_llm   # вместо get_gigachat
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -659,16 +660,15 @@ class SearchService:
             return []
 
     def _get_llm(self):
-        """Получает LLM сервис"""
+        """Получает LLM сервис через фабрику"""
         if self.llm_service is None:
-            from infrastructure.llm_integration import get_gigachat
-            self.llm_service = get_gigachat()
+            self.llm_service = get_llm()   # используем фабрику
         return self.llm_service
 
-    def _generate_gigachat_answer(self, question: str, context: str) -> Dict[str, Any]:
+    def _generate_llm_answer(self, question: str, context: str) -> Dict[str, Any]:
         """
-        Генерирует ответ GigaChat на основе вопроса и контекста
-        Возвращает словарь с ответом и метаданными
+        Генерирует ответ LLM (любой провайдер) на основе вопроса и контекста.
+        Возвращает словарь с ключами: content, success, finish_reason (если есть).
         """
         llm = self._get_llm()
 
@@ -678,9 +678,9 @@ class SearchService:
                 "Используй твою базу знаний для точных ответов на вопросы пользователя.\n\n"
                 "Особые указания:\n"
                 "- На вопросы 'сколько' - подсчитай количество соответствующих записей в базе знаний\n"
-                "Например, на вопрос 'Сколько музеев?' при информации 'Всего найдено записей: 98 (в контекст включено топ-5 по релевантности)', нужно ответить около 98 музеев и затем описание каждого музея из топ записей"
+                "Например, на вопрос 'Сколько музеев?' при информации 'Всего найдено записей: 98 (в контекст включено топ-5 по релевантности)', нужно ответить около 98 музеев и затем описание каждого музея из топ записей\n"
                 "- Будь информативным и лаконичным\n"
-                "- Начинай ответ с прямого ответа на запрос пользователя, отвечай ТОЛЬКО на него"
+                "- Начинай ответ с прямого ответа на запрос пользователя, отвечай ТОЛЬКО на него\n"
                 "- При запросе 'Какие другие достопримечательности есть?' нужно описать месторождения из твоей базы и другие достопримечательности которые ты знаешь!\n"
                 "- Даже при неполной информации предоставь доступные детали\n\n"
                 f"Твоя база знаний:\n{context}\n\n"
@@ -691,66 +691,37 @@ class SearchService:
 
         try:
             chain = prompt | llm
-
             response = chain.invoke({"question": question, "context": context})
 
-            logger.debug(f"Полный ответ GigaChat: {response}")
-            logger.debug(f"Тип ответа: {type(response)}")
+            # Универсальное извлечение содержимого
+            content = response.content.strip() if hasattr(response, 'content') else str(response)
 
+            # Пытаемся получить finish_reason (если есть)
             finish_reason = None
-
             if hasattr(response, 'response_metadata'):
-                logger.debug(f"response_metadata: {response.response_metadata}")
                 finish_reason = response.response_metadata.get('finish_reason')
-
-            if not finish_reason and hasattr(response, 'llm_output'):
-                logger.debug(f"llm_output: {response.llm_output}")
-                if isinstance(response.llm_output, dict):
-                    finish_reason = response.llm_output.get('finish_reason')
-
-            if not finish_reason and hasattr(response, 'finish_reason'):
-                finish_reason = response.finish_reason
-
             if not finish_reason and hasattr(response, 'additional_kwargs'):
-                logger.debug(f"additional_kwargs: {response.additional_kwargs}")
                 finish_reason = response.additional_kwargs.get('finish_reason')
 
-            logger.debug(f"Найден finish_reason: {finish_reason}")
+            # Для GigaChat проверяем blacklist, для остальных провайдеров считаем успехом наличие контента
+            is_success = bool(content)
+            if finish_reason == 'blacklist':
+                is_success = False
 
-            def convert_floats(obj):
-                if isinstance(obj, dict):
-                    return {k: convert_floats(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_floats(item) for item in obj]
-                elif hasattr(obj, 'dtype') and 'float32' in str(obj.dtype):
-                    return float(obj)
-                return obj
-
-            result_data = {
-                "content": response.content.strip() if hasattr(response, 'content') else "",
+            return {
+                "content": content,
                 "finish_reason": finish_reason,
-                "success": finish_reason != 'blacklist'
+                "success": is_success
             }
 
-            result_data = convert_floats(result_data)
-
-            return result_data
-
         except Exception as e:
-            logger.error(f"Ошибка генерации ответа GigaChat: {str(e)}")
-
-            logger.debug(f"Тип исключения: {type(e)}")
-            if hasattr(e, 'response'):
-                logger.debug(f"Response в исключении: {e.response}")
-
-            error_str = str(e).lower()
-
+            logger.error(f"Ошибка генерации ответа LLM: {str(e)}")
             return {
                 "content": "Извините, не удалось сгенерировать ответ на основе доступной информации.",
                 "finish_reason": "error",
                 "success": False
             }
-
+            
     def search_images_by_features(
         self,
         species_name: str,

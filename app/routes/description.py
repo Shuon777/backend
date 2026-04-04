@@ -441,8 +441,8 @@ def get_object_description():
                     logger.error(f"❌ Ошибка сохранения промпта: {e}")
 
             try:
-                gigachat_result = search_service._generate_gigachat_answer(query, context)
-                is_blacklist = gigachat_result.get("finish_reason") == "blacklist" or not gigachat_result.get("success", True)
+                llm_result = search_service._generate_llm_answer(query, context)
+                is_blacklist = llm_result.get("finish_reason") == "blacklist" or not llm_result.get("success", True)
 
                 if is_blacklist:
                     logger.info("🚫 GigaChat вернул blacklist, возвращаем форматированные безопасные описания")
@@ -522,7 +522,7 @@ def get_object_description():
                     if debug_mode:
                         response_data["debug"] = debug_info
                         response_data["debug"]["gigachat_generation"] = {
-                            "finish_reason": gigachat_result.get("finish_reason"),
+                            "finish_reason": llm_result.get("finish_reason"),
                             "blacklist_detected": True,
                             "fallback_to_descriptions": True,
                             "prompt_saved": save_prompt,
@@ -531,7 +531,7 @@ def get_object_description():
 
                     return jsonify(response_data)
 
-                gigachat_response = gigachat_result.get("content", "")
+                gigachat_response = llm_result.get("content", "")
                 external_ids = extract_all_external_ids(context_descriptions)
                 source_descriptions_summary = []
 
@@ -587,7 +587,7 @@ def get_object_description():
                     response_data["debug"] = debug_info
                     response_data["debug"]["gigachat_generation"] = {
                         "response_length": len(gigachat_response),
-                        "finish_reason": gigachat_result.get("finish_reason"),
+                        "finish_reason": llm_result.get("finish_reason"),
                         "blacklist_detected": False,
                         "prompt_saved": save_prompt,
                         "external_ids_found": len(external_ids)
