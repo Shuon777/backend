@@ -15,25 +15,24 @@ CREATE SCHEMA IF NOT EXISTS eco_assistant;
 CREATE TABLE eco_assistant.object_type (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    schema JSONB NOT NULL DEFAULT '{}'::jsonb,        -- схема для заполнения свойств
+    schema JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.object_type IS 'Справочник типов объектов';
-COMMENT ON COLUMN eco_assistant.object_type.schema IS 'JSON-схема свойств объекта';
 
 -- ============================================================
 -- 2. Основная таблица объектов
 -- ============================================================
 CREATE TABLE eco_assistant.object (
     id SERIAL PRIMARY KEY,
-    db_id TEXT NOT NULL UNIQUE,                       -- бывший canonical_id (хэш)
+    db_id TEXT NOT NULL UNIQUE,
     object_type_id INTEGER NOT NULL REFERENCES eco_assistant.object_type(id),
-    object_properties JSONB NOT NULL DEFAULT '{}'::jsonb,  -- произвольные свойства
+    object_properties JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
-COMMENT ON TABLE eco_assistant.object IS 'Объект (бывш. object_description)';
+COMMENT ON TABLE eco_assistant.object IS 'Объект';
 CREATE INDEX idx_object_db_id ON eco_assistant.object(db_id);
 CREATE INDEX idx_object_type ON eco_assistant.object(object_type_id);
 
@@ -44,7 +43,6 @@ CREATE TABLE eco_assistant.object_name_synonym (
     id SERIAL PRIMARY KEY,
     synonym TEXT NOT NULL,
     language VARCHAR(10) DEFAULT 'ru',
-    is_primary BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.object_name_synonym IS 'Справочник синонимов названий объектов';
@@ -56,29 +54,40 @@ CREATE TABLE eco_assistant.object_name_synonym_link (
 );
 COMMENT ON TABLE eco_assistant.object_name_synonym_link IS 'Связь имен объектов с синонимами';
 
--- Индексы для поиска
 CREATE INDEX idx_synonym_trgm ON eco_assistant.object_name_synonym USING GIN (synonym gin_trgm_ops);
 CREATE INDEX idx_synonym_mapping_object ON eco_assistant.object_name_synonym_link(object_id);
 CREATE INDEX idx_synonym_mapping_synonym ON eco_assistant.object_name_synonym_link(synonym_id);
 
 -- ============================================================
--- 4. Справочник модальностей
+-- 4. Связи между объектами
+-- ============================================================
+CREATE TABLE eco_assistant.object_object_link (
+    object_id INTEGER NOT NULL REFERENCES eco_assistant.object(id) ON DELETE CASCADE,
+    related_object_id INTEGER NOT NULL REFERENCES eco_assistant.object(id) ON DELETE CASCADE,
+    relation_type TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (object_id, related_object_id, relation_type)
+);
+COMMENT ON TABLE eco_assistant.object_object_link IS 'Связи между объектами';
+
+-- ============================================================
+-- 5. Справочник модальностей
 -- ============================================================
 CREATE TABLE eco_assistant.modality (
     id SERIAL PRIMARY KEY,
     modality_type TEXT NOT NULL UNIQUE,
-    value_table_name TEXT NOT NULL,                   -- имя таблицы со значениями (например 'text_value')
+    value_table_name TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 COMMENT ON TABLE eco_assistant.modality IS 'Справочник модальностей ресурсов';
 
 -- ============================================================
--- 5. Таблицы значений модальностей
+-- 6. Таблицы значений модальностей
 -- ============================================================
 CREATE TABLE eco_assistant.text_value (
     id SERIAL PRIMARY KEY,
-    content JSONB NOT NULL,
+    structured_data JSONB NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -88,9 +97,6 @@ CREATE TABLE eco_assistant.image_value (
     id SERIAL PRIMARY KEY,
     url TEXT,
     file_path TEXT,
-    quality VARCHAR(50),
-    width INTEGER,
-    height INTEGER,
     format VARCHAR(20),
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
@@ -101,6 +107,7 @@ COMMENT ON TABLE eco_assistant.image_value IS 'Значения модально
 CREATE TABLE eco_assistant.geodata_value (
     id SERIAL PRIMARY KEY,
     geometry GEOMETRY(Geometry, 4326) NOT NULL,
+    geometry_type TEXT,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -108,20 +115,20 @@ COMMENT ON TABLE eco_assistant.geodata_value IS 'Значения модальн
 CREATE INDEX idx_geodata_value_geom ON eco_assistant.geodata_value USING GIST(geometry);
 
 -- ============================================================
--- 6. Связь ресурсов со значениями модальностей
+-- 7. Связь ресурсов со значениями модальностей
 -- ============================================================
 CREATE TABLE eco_assistant.resource_value (
     id SERIAL PRIMARY KEY,
-    resource_id INTEGER NOT NULL,                     -- будет добавлено после создания resource
+    resource_id INTEGER NOT NULL,
     modality_id INTEGER NOT NULL REFERENCES eco_assistant.modality(id),
-    value_id INTEGER,  -- id в таблице значений (text_value, image_value, geodata_value)
+    value_id INTEGER,
     created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(resource_id, modality_id)                  -- один ресурс - одна модальность
+    UNIQUE(resource_id, modality_id)
 );
 COMMENT ON TABLE eco_assistant.resource_value IS 'Связь ресурса с модальностью и значением';
 
 -- ============================================================
--- 7. Справочники для библиографических данных
+-- 8. Справочники для библиографических данных
 -- ============================================================
 CREATE TABLE eco_assistant.author (
     id SERIAL PRIMARY KEY,
@@ -137,13 +144,6 @@ CREATE TABLE eco_assistant.source (
 );
 COMMENT ON TABLE eco_assistant.source IS 'Справочник источников';
 
-CREATE TABLE eco_assistant.usage_right (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-COMMENT ON TABLE eco_assistant.usage_right IS 'Справочник прав использования';
-
 CREATE TABLE eco_assistant.reliability_level (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -152,14 +152,13 @@ CREATE TABLE eco_assistant.reliability_level (
 COMMENT ON TABLE eco_assistant.reliability_level IS 'Справочник уровней достоверности';
 
 -- ============================================================
--- 8. Библиографические данные
+-- 9. Библиографические данные
 -- ============================================================
 CREATE TABLE eco_assistant.bibliographic (
     id SERIAL PRIMARY KEY,
     author_id INTEGER REFERENCES eco_assistant.author(id),
     date DATE,
     source_id INTEGER REFERENCES eco_assistant.source(id),
-    usage_right_id INTEGER REFERENCES eco_assistant.usage_right(id),
     reliability_level_id INTEGER REFERENCES eco_assistant.reliability_level(id),
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
@@ -167,7 +166,7 @@ CREATE TABLE eco_assistant.bibliographic (
 COMMENT ON TABLE eco_assistant.bibliographic IS 'Библиографические данные';
 
 -- ============================================================
--- 9. Данные о создании (бывш. generation)
+-- 10. Данные о создании
 -- ============================================================
 CREATE TABLE eco_assistant.creation (
     id SERIAL PRIMARY KEY,
@@ -180,10 +179,11 @@ CREATE TABLE eco_assistant.creation (
 COMMENT ON TABLE eco_assistant.creation IS 'Данные о создании (источник)';
 
 -- ============================================================
--- 10. Статические метаданные ресурса
+-- 11. Статические метаданные ресурса
 -- ============================================================
 CREATE TABLE eco_assistant.resource_static (
     id SERIAL PRIMARY KEY,
+    static_id TEXT UNIQUE,
     bibliographic_id INTEGER NOT NULL REFERENCES eco_assistant.bibliographic(id),
     creation_id INTEGER NOT NULL REFERENCES eco_assistant.creation(id),
     created_at TIMESTAMPTZ DEFAULT now(),
@@ -192,7 +192,7 @@ CREATE TABLE eco_assistant.resource_static (
 COMMENT ON TABLE eco_assistant.resource_static IS 'Статические метаданные ресурса';
 
 -- ============================================================
--- 11. Метаданные сопровождения
+-- 12. Метаданные сопровождения
 -- ============================================================
 CREATE TABLE eco_assistant.support_metadata (
     id SERIAL PRIMARY KEY,
@@ -203,50 +203,47 @@ CREATE TABLE eco_assistant.support_metadata (
 COMMENT ON TABLE eco_assistant.support_metadata IS 'Метаданные сопровождения';
 
 -- ============================================================
--- 12. Ресурс (центральная сущность)
+-- 13. Ресурс (центральная сущность)
 -- ============================================================
 CREATE TABLE eco_assistant.resource (
     id SERIAL PRIMARY KEY,
+    title TEXT,
+    uri TEXT,
+    features JSONB,
+    text_id TEXT UNIQUE,
     resource_static_id INTEGER NOT NULL REFERENCES eco_assistant.resource_static(id) ON DELETE CASCADE,
     support_metadata_id INTEGER NOT NULL REFERENCES eco_assistant.support_metadata(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
-COMMENT ON TABLE eco_assistant.resource IS 'Ресурс';
+CREATE INDEX idx_resource_text_id ON eco_assistant.resource(text_id);
 
 -- ============================================================
--- 13. Связь ресурса с объектами (многие ко многим)
+-- 14. Связь ресурса с объектами
 -- ============================================================
 CREATE TABLE eco_assistant.resource_object (
     resource_id INTEGER NOT NULL REFERENCES eco_assistant.resource(id) ON DELETE CASCADE,
     object_id INTEGER NOT NULL REFERENCES eco_assistant.object(id) ON DELETE CASCADE,
+    relation_type TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (resource_id, object_id)
 );
 COMMENT ON TABLE eco_assistant.resource_object IS 'Связь ресурса с объектами';
 
 -- ============================================================
--- 14. Признаки ресурса (онтология) в формате JSON
+-- 15. Связь ресурса с ресурсами
 -- ============================================================
-CREATE TABLE eco_assistant.feature_json (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    data JSONB NOT NULL,                              -- вместо description
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-COMMENT ON TABLE eco_assistant.feature_json IS 'Словарь признаков ресурса в формате JSON';
-
--- ============================================================
--- 15. Связь ресурса с признаками
--- ============================================================
-CREATE TABLE eco_assistant.resource_feature (
+CREATE TABLE eco_assistant.resource_resource_link (
     resource_id INTEGER NOT NULL REFERENCES eco_assistant.resource(id) ON DELETE CASCADE,
-    feature_id INTEGER NOT NULL REFERENCES eco_assistant.feature_json(id) ON DELETE CASCADE,
-    PRIMARY KEY (resource_id, feature_id)
+    related_resource_id INTEGER NOT NULL REFERENCES eco_assistant.resource(id) ON DELETE CASCADE,
+    relation_type TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (resource_id, related_resource_id, relation_type)
 );
-COMMENT ON TABLE eco_assistant.resource_feature IS 'Связь ресурса с признаками';
+COMMENT ON TABLE eco_assistant.resource_resource_link IS 'Связи между ресурсами';
 
 -- ============================================================
--- 16. Обратная ссылка: ресурс -> значение модальности (добавляем foreign key после создания resource)
+-- 16. Добавляем внешний ключ для resource_value после создания resource
 -- ============================================================
 ALTER TABLE eco_assistant.resource_value
     ADD CONSTRAINT fk_resource_value_resource

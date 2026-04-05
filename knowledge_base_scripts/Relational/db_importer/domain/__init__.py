@@ -6,13 +6,11 @@ from .entities import (
     ObjectNameSynonym,
     DbId,
     Modality,
-    ResourceValue,
     TextValue,
     ImageValue,
     GeodataValue,
     Author,
     Source,
-    UsageRight,
     ReliabilityLevel,
     BibliographicData,
     CreationData,
@@ -21,7 +19,6 @@ from .entities import (
     Resource,
     ResourceImportResult,
     ModalityType,
-    ResourceType,
 )
 
 __all__ = [
@@ -30,13 +27,11 @@ __all__ = [
     'ObjectNameSynonym',
     'DbId',
     'Modality',
-    'ResourceValue',
     'TextValue',
     'ImageValue',
     'GeodataValue',
     'Author',
     'Source',
-    'UsageRight',
     'ReliabilityLevel',
     'BibliographicData',
     'CreationData',
@@ -45,5 +40,4 @@ __all__ = [
     'Resource',
     'ResourceImportResult',
     'ModalityType',
-    'ResourceType',
 ]

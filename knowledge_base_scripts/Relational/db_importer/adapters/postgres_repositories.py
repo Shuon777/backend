@@ -1,5 +1,5 @@
 import json
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from psycopg2.extras import Json as PgJson
 
 from ..domain.entities import (
@@ -18,7 +18,6 @@ from ..domain.entities import (
     DbId,
     Author,
     Source,
-    UsageRight,
     ReliabilityLevel,
 )
 from ..use_cases.interfaces import (
@@ -48,18 +47,36 @@ class PostgresResourceRepository(ResourceRepository):
 
     def save_resource(self, resource: Resource) -> int:
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.resource (resource_static_id, support_metadata_id) "
-            "VALUES (%s, %s) RETURNING id",
-            (resource.resource_static_id, resource.support_metadata_id)
+            "INSERT INTO eco_assistant.resource (title, uri, features, text_id, resource_static_id, support_metadata_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (resource.title, resource.uri, 
+             PgJson(resource.features) if resource.features else None,
+             resource.text_id,
+             resource.resource_static_id, resource.support_metadata_id)
         )
         self._client.commit()
         return row[0]
 
-    def link_resource_to_object(self, resource_id: int, object_id: int) -> None:
+    def link_resource_to_object(self, resource_id: int, object_id: int, relation_type: Optional[str] = None) -> None:
         self._client.execute(
-            "INSERT INTO eco_assistant.resource_object (resource_id, object_id) "
-            "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-            (resource_id, object_id)
+            "INSERT INTO eco_assistant.resource_object (resource_id, object_id, relation_type) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (resource_id, object_id, relation_type)
+        )
+        self._client.commit()
+
+    def find_resource_by_text_id(self, text_id: str) -> Optional[int]:
+        row = self._client.fetchone(
+            "SELECT id FROM eco_assistant.resource WHERE text_id = %s",
+            (text_id,)
+        )
+        return row[0] if row else None
+
+    def link_resource_to_resource(self, resource_id: int, related_resource_id: int, relation_type: str) -> None:
+        self._client.execute(
+            "INSERT INTO eco_assistant.resource_resource_link (resource_id, related_resource_id, relation_type) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (resource_id, related_resource_id, relation_type)
         )
         self._client.commit()
 
@@ -68,11 +85,52 @@ class PostgresObjectRepository(ObjectRepository):
     def __init__(self, client: DatabaseClient):
         self._client = client
 
-    def find_by_db_id(self, db_id: str, object_type_id: int) -> Optional[Object]:
+    def find_by_db_id(self, db_id: str) -> Optional[Object]:
         row = self._client.fetchone(
             "SELECT id, db_id, object_type_id, object_properties, created_at, updated_at "
-            "FROM eco_assistant.object WHERE db_id = %s AND object_type_id = %s",
-            (db_id, object_type_id)
+            "FROM eco_assistant.object WHERE db_id = %s",
+            (db_id,)
+        )
+        if not row:
+            return None
+        
+        return Object(
+            id=row[0],
+            db_id=DbId(row[1]),
+            object_type_id=row[2],
+            object_properties=row[3],
+            created_at=row[4],
+            updated_at=row[5]
+        )
+    
+    def save(self, obj: Object) -> Object:
+        if obj.id is not None:
+            row = self._client.fetchone(
+                "UPDATE eco_assistant.object SET object_type_id = %s, object_properties = %s, updated_at = now() "
+                "WHERE id = %s RETURNING id, created_at, updated_at",
+                (obj.object_type_id, PgJson(obj.object_properties), obj.id)
+            )
+            if row:
+                obj.created_at = row[1]
+                obj.updated_at = row[2]
+        else:
+            row = self._client.fetchone(
+                "INSERT INTO eco_assistant.object (db_id, object_type_id, object_properties) "
+                "VALUES (%s, %s, %s) RETURNING id, created_at, updated_at",
+                (str(obj.db_id), obj.object_type_id, PgJson(obj.object_properties))
+            )
+            obj.id = row[0]
+            obj.created_at = row[1]
+            obj.updated_at = row[2]
+        
+        self._client.commit()
+        return obj
+
+    def find_by_db_id_only(self, db_id: str) -> Optional[Object]:
+        row = self._client.fetchone(
+            "SELECT id, db_id, object_type_id, object_properties, created_at, updated_at "
+            "FROM eco_assistant.object WHERE db_id = %s",
+            (db_id,)
         )
         if not row:
             return None
@@ -85,23 +143,19 @@ class PostgresObjectRepository(ObjectRepository):
             updated_at=row[5]
         )
 
-    def save(self, obj: Object) -> Object:
-        row = self._client.fetchone(
-            "INSERT INTO eco_assistant.object (db_id, object_type_id, object_properties) "
-            "VALUES (%s, %s, %s) RETURNING id, created_at, updated_at",
-            (str(obj.db_id), obj.object_type_id, PgJson(obj.object_properties))
-        )
-        obj.id = row[0]
-        obj.created_at = row[1]
-        obj.updated_at = row[2]
-        self._client.commit()
-        return obj
-
     def add_synonym_link(self, object_id: int, synonym_id: int) -> None:
         self._client.execute(
             "INSERT INTO eco_assistant.object_name_synonym_link (object_id, synonym_id) "
             "VALUES (%s, %s) ON CONFLICT DO NOTHING",
             (object_id, synonym_id)
+        )
+        self._client.commit()
+
+    def link_object_to_object(self, object_id: int, related_object_id: int, relation_type: str) -> None:
+        self._client.execute(
+            "INSERT INTO eco_assistant.object_object_link (object_id, related_object_id, relation_type) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (object_id, related_object_id, relation_type)
         )
         self._client.commit()
 
@@ -139,13 +193,13 @@ class PostgresSynonymRepository(SynonymRepository):
         self._client = client
         self._cache: Dict[str, ObjectNameSynonym] = {}
 
-    def get_or_create(self, synonym: str, language: str, is_primary: bool) -> ObjectNameSynonym:
-        key = f"{synonym}|{language}|{is_primary}"
+    def get_or_create(self, synonym: str, language: str) -> ObjectNameSynonym:
+        key = f"{synonym}|{language}"
         if key in self._cache:
             return self._cache[key]
 
         row = self._client.fetchone(
-            "SELECT id, synonym, language, is_primary FROM eco_assistant.object_name_synonym "
+            "SELECT id, synonym, language FROM eco_assistant.object_name_synonym "
             "WHERE synonym = %s AND language = %s",
             (synonym, language)
         )
@@ -153,22 +207,20 @@ class PostgresSynonymRepository(SynonymRepository):
             syn = ObjectNameSynonym(
                 id=row[0],
                 synonym=row[1],
-                language=row[2],
-                is_primary=row[3]
+                language=row[2]
             )
             self._cache[key] = syn
             return syn
 
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.object_name_synonym (synonym, language, is_primary) "
-            "VALUES (%s, %s, %s) RETURNING id",
-            (synonym, language, is_primary)
+            "INSERT INTO eco_assistant.object_name_synonym (synonym, language) "
+            "VALUES (%s, %s) RETURNING id",
+            (synonym, language)
         )
         syn = ObjectNameSynonym(
             id=row[0],
             synonym=synonym,
-            language=language,
-            is_primary=is_primary
+            language=language
         )
         self._client.commit()
         self._cache[key] = syn
@@ -214,17 +266,17 @@ class PostgresModalityRepository(ModalityRepository):
 
     def save_text_value(self, value: TextValue) -> int:
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.text_value (content) VALUES (%s) RETURNING id",
-            (PgJson(value.content),)
+            "INSERT INTO eco_assistant.text_value (structured_data) VALUES (%s) RETURNING id",
+            (PgJson(value.structured_data),)
         )
         self._client.commit()
         return row[0]
 
     def save_image_value(self, value: ImageValue) -> int:
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.image_value (url, file_path, quality, width, height, format) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (value.url, value.file_path, value.quality, value.width, value.height, value.format)
+            "INSERT INTO eco_assistant.image_value (url, file_path, format) "
+            "VALUES (%s, %s, %s) RETURNING id",
+            (value.url, value.file_path, value.format)
         )
         self._client.commit()
         return row[0]
@@ -232,9 +284,9 @@ class PostgresModalityRepository(ModalityRepository):
     def save_geodata_value(self, value: GeodataValue) -> int:
         geom_json = json.dumps(value.geometry)
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.geodata_value (geometry) "
-            "VALUES (ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)) RETURNING id",
-            (geom_json,)
+            "INSERT INTO eco_assistant.geodata_value (geometry, geometry_type) "
+            "VALUES (ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s) RETURNING id",
+            (geom_json, value.geometry_type)
         )
         self._client.commit()
         return row[0]
@@ -253,10 +305,11 @@ class PostgresBibliographicRepository(BibliographicRepository):
         self._client = client
         self._author_cache: Dict[str, int] = {}
         self._source_cache: Dict[str, int] = {}
-        self._right_cache: Dict[str, int] = {}
         self._reliability_cache: Dict[str, int] = {}
 
     def get_or_create_author(self, name: str) -> int:
+        if not name:
+            return None
         if name in self._author_cache:
             return self._author_cache[name]
 
@@ -298,28 +351,6 @@ class PostgresBibliographicRepository(BibliographicRepository):
         self._source_cache[name] = row[0]
         return row[0]
 
-    def get_or_create_usage_right(self, name: str) -> int:
-        if not name:
-            return None
-        if name in self._right_cache:
-            return self._right_cache[name]
-
-        row = self._client.fetchone(
-            "SELECT id FROM eco_assistant.usage_right WHERE name = %s",
-            (name,)
-        )
-        if row:
-            self._right_cache[name] = row[0]
-            return row[0]
-
-        row = self._client.fetchone(
-            "INSERT INTO eco_assistant.usage_right (name) VALUES (%s) RETURNING id",
-            (name,)
-        )
-        self._client.commit()
-        self._right_cache[name] = row[0]
-        return row[0]
-
     def get_or_create_reliability_level(self, name: str) -> int:
         if not name:
             return None
@@ -348,20 +379,19 @@ class PostgresBibliographicRepository(BibliographicRepository):
             "COALESCE(author_id, 0) = COALESCE(%s, 0) AND "
             "COALESCE(date::text, '') = COALESCE(%s, '') AND "
             "COALESCE(source_id, 0) = COALESCE(%s, 0) AND "
-            "COALESCE(usage_right_id, 0) = COALESCE(%s, 0) AND "
             "COALESCE(reliability_level_id, 0) = COALESCE(%s, 0)",
             (bibliographic.author_id, bibliographic.date, bibliographic.source_id,
-            bibliographic.usage_right_id, bibliographic.reliability_level_id)
+             bibliographic.reliability_level_id)
         )
         if row:
             return row[0]
 
         row = self._client.fetchone(
             "INSERT INTO eco_assistant.bibliographic "
-            "(author_id, date, source_id, usage_right_id, reliability_level_id) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            "(author_id, date, source_id, reliability_level_id) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
             (bibliographic.author_id, bibliographic.date if bibliographic.date else None,
-            bibliographic.source_id, bibliographic.usage_right_id, bibliographic.reliability_level_id)
+             bibliographic.source_id, bibliographic.reliability_level_id)
         )
         self._client.commit()
         return row[0]
@@ -406,11 +436,29 @@ class PostgresResourceStaticRepository(ResourceStaticRepository):
         self._client = client
         self._cache: Dict[tuple, int] = {}
 
+    def find_by_static_id(self, static_id: str) -> Optional[int]:
+        row = self._client.fetchone(
+            "SELECT id FROM eco_assistant.resource_static WHERE static_id = %s",
+            (static_id,)
+        )
+        return row[0] if row else None
+
     def get_or_create(self, static: ResourceStatic) -> int:
-        key = (static.bibliographic_id, static.creation_id)
+        key = (static.static_id, static.bibliographic_id, static.creation_id)
         if key in self._cache:
             return self._cache[key]
 
+        # Try to find by static_id first
+        if static.static_id:
+            row = self._client.fetchone(
+                "SELECT id FROM eco_assistant.resource_static WHERE static_id = %s",
+                (static.static_id,)
+            )
+            if row:
+                self._cache[key] = row[0]
+                return row[0]
+
+        # Find by bibliographic and creation
         row = self._client.fetchone(
             "SELECT id FROM eco_assistant.resource_static WHERE "
             "bibliographic_id = %s AND creation_id = %s",
@@ -420,10 +468,11 @@ class PostgresResourceStaticRepository(ResourceStaticRepository):
             self._cache[key] = row[0]
             return row[0]
 
+        # Create new
         row = self._client.fetchone(
-            "INSERT INTO eco_assistant.resource_static (bibliographic_id, creation_id) "
-            "VALUES (%s, %s) RETURNING id",
-            (static.bibliographic_id, static.creation_id)
+            "INSERT INTO eco_assistant.resource_static (static_id, bibliographic_id, creation_id) "
+            "VALUES (%s, %s, %s) RETURNING id",
+            (static.static_id, static.bibliographic_id, static.creation_id)
         )
         self._client.commit()
         self._cache[key] = row[0]

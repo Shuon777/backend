@@ -1,6 +1,7 @@
 """Use cases layer - business scenarios."""
 
-from .import_resource import ImportResourceUseCase, BatchImportUseCase
+from .import_objects import ImportObjectsUseCase
+from .import_resources import ImportResourcesUseCase
 from .interfaces import (
     ResourceRepository,
     ObjectRepository,
@@ -12,12 +13,13 @@ from .interfaces import (
     ResourceStaticRepository,
     SupportMetadataRepository,
     SpeciesNameNormalizer,
-    SchemaRepository
+    SchemaRepository,
+    GeodataProvider
 )
 
 __all__ = [
-    'ImportResourceUseCase',
-    'BatchImportUseCase',
+    'ImportObjectsUseCase',
+    'ImportResourcesUseCase',
     'ResourceRepository',
     'ObjectRepository',
     'ObjectTypeRepository',
@@ -28,5 +30,6 @@ __all__ = [
     'ResourceStaticRepository',
     'SupportMetadataRepository',
     'SpeciesNameNormalizer',
-    'SchemaRepository'
+    'SchemaRepository',
+    'GeodataProvider'
 ]

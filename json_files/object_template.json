@@ -1,0 +1,33 @@
+{
+  "objects": [
+    {
+      "identificator": {
+        "db_id": "string"
+      },
+      "type": "string",
+      "name_synonyms": {
+        "ru_names": "array",
+        "scientific_names": "array",
+        "en_names": "array"
+      },
+      "properties": {
+        "Семейство_sn": "string",
+        "Род_sn": "string",
+        "Вид_sn": "string",
+        "subtypes": "array",
+        "exact_location": "string",
+        "region": "string",
+        "baikal_relation": "string",
+        "Тип ОФФ": "string",
+        "Семейство_ru": "string",
+        "Род_ru": "string",
+        "Вид_ru": "string"
+      },
+      "object_relations": "array",
+      "object_relations[]": {
+        "db_id": "string",
+        "type": "string"
+      }
+    }
+  ]
+}

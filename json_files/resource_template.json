@@ -1,0 +1,118 @@
+{
+  "resources": [
+    {
+      "title": "string",
+      "identificator": {
+        "id": "string",
+        "uri": "string"
+      },
+      "bibliographic": {
+        "author": "string",
+        "source": "string",
+        "reliability_level": "string"
+      },
+      "modality": {
+        "type": "string",
+        "value": {
+          "url": "string",
+          "file_path": "string",
+          "format": "string",
+          "structured_data": {
+            "content": "string",
+            "taxonomy": {
+              "family": "string",
+              "genus": "string",
+              "species": "string"
+            },
+            "morphology": {
+              "general_description": "string",
+              "size_weight": "string",
+              "body_structure": "string",
+              "coloration": "string",
+              "special_adaptations": "string",
+              "special_adapters": "string",
+              "stem": "string",
+              "leaves": "string",
+              "flowers": "string",
+              "fruits": "string",
+              "roots": "string"
+            },
+            "biology": {
+              "diet": "string",
+              "reproduction": "string",
+              "lifespan": "string",
+              "behavior": "string"
+            },
+            "ecology": {
+              "habitat": "string",
+              "depth_distribution": "string",
+              "ecological_role": "string",
+              "predators": "string",
+              "soil_preferences": "string",
+              "moisture_requirements": "string",
+              "light_requirements": "string",
+              "species_interactions": "string"
+            },
+            "distribution": {
+              "geographical_range": "string",
+              "baikal_region_status": "string",
+              "protected_areas": "string"
+            },
+            "conservation": {
+              "protection_status": "string",
+              "red_book_status": "string",
+              "threats": "string"
+            },
+            "significance": {
+              "scientific_value": "string",
+              "practical_use": "string"
+            },
+            "phenology": {
+              "flowering_period": "string",
+              "fruiting_period": "string",
+              "vegetation_period": "string"
+            },
+            "morphonia": {
+              "general_description": "string",
+              "stem": "string",
+              "leaves": "string",
+              "flowers": "string",
+              "fruits": "string",
+              "roots": "string"
+            }
+          },
+          "geodb_id": "string",
+          "geometry_type": "string"
+        }
+      },
+      "object_relations": "array",
+      "object_relations[]": {
+        "db_id": "string",
+        "type": "string"
+      },
+      "resource_relations": "array",
+      "resource_relations[]": {
+        "id": "string",
+        "type": "string"
+      },
+      "features": "array",
+      "features[]": {
+        "name": "string",
+        "value": {
+          "__type__": "union",
+          "possible_types": [
+            "integer",
+            "string"
+          ]
+        }
+      },
+      "creation": {
+        "creation_type": "string",
+        "creation_tool": "string"
+      },
+      "support_metadata": {
+        "question": "string"
+      }
+    }
+  ]
+}

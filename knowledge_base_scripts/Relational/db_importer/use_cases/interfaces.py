@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from ..domain.entities import (
     Resource,
@@ -13,10 +13,8 @@ from ..domain.entities import (
     ImageValue,
     GeodataValue,
     Modality,
-    ResourceValue,
     Author,
     Source,
-    UsageRight,
     ReliabilityLevel,
     ObjectType,
 )
@@ -32,21 +30,33 @@ class ResourceRepository(ABC):
         pass
 
     @abstractmethod
-    def link_resource_to_object(self, resource_id: int, object_id: int) -> None:
+    def link_resource_to_object(self, resource_id: int, object_id: int, relation_type: Optional[str] = None) -> None:
+        pass
+
+    @abstractmethod
+    def find_resource_by_text_id(self, text_id: str) -> Optional[int]:
+        pass
+
+    @abstractmethod
+    def link_resource_to_resource(self, resource_id: int, related_resource_id: int, relation_type: str) -> None:
         pass
 
 
 class ObjectRepository(ABC):
     @abstractmethod
-    def find_by_db_id(self, db_id: str, object_type_id: int) -> Optional[Object]:
+    def find_by_db_id(self, db_id: str) -> Optional[Object]:
         pass
-
+    
     @abstractmethod
     def save(self, obj: Object) -> Object:
         pass
-
+    
     @abstractmethod
     def add_synonym_link(self, object_id: int, synonym_id: int) -> None:
+        pass
+    
+    @abstractmethod
+    def link_object_to_object(self, object_id: int, related_object_id: int, relation_type: str) -> None:
         pass
 
 
@@ -58,7 +68,7 @@ class ObjectTypeRepository(ABC):
 
 class SynonymRepository(ABC):
     @abstractmethod
-    def get_or_create(self, synonym: str, language: str, is_primary: bool) -> ObjectNameSynonym:
+    def get_or_create(self, synonym: str, language: str) -> ObjectNameSynonym:
         pass
 
 
@@ -94,10 +104,6 @@ class BibliographicRepository(ABC):
         pass
 
     @abstractmethod
-    def get_or_create_usage_right(self, name: str) -> int:
-        pass
-
-    @abstractmethod
     def get_or_create_reliability_level(self, name: str) -> int:
         pass
 
@@ -115,6 +121,10 @@ class CreationRepository(ABC):
 class ResourceStaticRepository(ABC):
     @abstractmethod
     def get_or_create(self, static: ResourceStatic) -> int:
+        pass
+
+    @abstractmethod
+    def find_by_static_id(self, static_id: str) -> Optional[int]:
         pass
 
 
@@ -141,4 +151,11 @@ class SchemaRepository(ABC):
 
     @abstractmethod
     def create_all(self) -> None:
+        pass
+
+
+class GeodataProvider(ABC):
+    @abstractmethod
+    def get_geometry(self, geodb_id: str) -> Optional[Tuple[Dict[str, Any], str]]:
+        """Returns (geometry_dict, geometry_type) or None"""
         pass
