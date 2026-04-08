@@ -1,14 +1,13 @@
-# search_api/adapters/search_repository.py
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from ..domain.entities import ObjectResult, ResourceResult
+from ..domain.entities import ObjectResult, ResourceResult, ObjectCriteria, ResourceCriteria
 
 
 class SearchRepository(ABC):
     @abstractmethod
-    def search_objects(self, query: str) -> List[ObjectResult]:
+    def find_objects_by_criteria(self, criteria: ObjectCriteria) -> List[ObjectResult]:
         pass
 
     @abstractmethod
-    def search_resources(self, object_ids: List[int], modality: Optional[str]) -> List[ResourceResult]:
+    def find_resources_by_criteria(self, criteria: ResourceCriteria, object_ids: Optional[List[int]] = None) -> List[ResourceResult]:
         pass
