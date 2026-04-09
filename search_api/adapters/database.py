@@ -1,3 +1,4 @@
+# search_api/adapters/database.py
 import psycopg2
 import json
 from psycopg2.extras import RealDictCursor
@@ -20,8 +21,8 @@ class PostgresSearchRepository(SearchRepository):
     def _get_conn(self):
         return psycopg2.connect(**self._conn_params, cursor_factory=RealDictCursor)
 
-    def find_objects_by_criteria(self, criteria: ObjectCriteria) -> List[ObjectResult]:
-        if not criteria.db_id and not criteria.name_synonyms and not criteria.properties:
+    def find_objects_by_criteria(self, criteria: ObjectCriteria, limit: int = 20, offset: int = 0) -> List[ObjectResult]:
+        if not criteria.db_id and not criteria.name_synonyms and not criteria.properties and not criteria.object_type:
             return []
         
         with self._get_conn() as conn:
@@ -42,6 +43,10 @@ class PostgresSearchRepository(SearchRepository):
                     sql += " AND o.db_id = %s"
                     params.append(criteria.db_id)
                 
+                if criteria.object_type:
+                    sql += " AND ot.name = %s"
+                    params.append(criteria.object_type)
+                
                 if criteria.name_synonyms:
                     names = []
                     for lang, name_list in criteria.name_synonyms.items():
@@ -57,7 +62,8 @@ class PostgresSearchRepository(SearchRepository):
                         sql += f" AND o.object_properties @> %s::jsonb"
                         params.append(json.dumps({key: value}))
                 
-                sql += " GROUP BY o.id, ot.name LIMIT 20"
+                sql += " GROUP BY o.id, ot.name"
+                sql += f" LIMIT {limit} OFFSET {offset}"
                 cur.execute(sql, params)
                 rows = cur.fetchall()
                 return [
@@ -70,7 +76,7 @@ class PostgresSearchRepository(SearchRepository):
                     ) for r in rows
                 ]
 
-    def find_resources_by_criteria(self, criteria: ResourceCriteria, object_ids: Optional[List[int]] = None) -> List[ResourceResult]:
+    def find_resources_by_criteria(self, criteria: ResourceCriteria, object_ids: Optional[List[int]] = None, limit: int = 50, offset: int = 0) -> List[ResourceResult]:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 sql = """
@@ -140,7 +146,7 @@ class PostgresSearchRepository(SearchRepository):
                         sql += " AND tv.structured_data->'taxonomy'->>%s = %s"
                         params.extend([key, value])
                 
-                sql += " LIMIT 50"
+                sql += f" LIMIT {limit} OFFSET {offset}"
                 cur.execute(sql, params)
                 rows = cur.fetchall()
                 return [

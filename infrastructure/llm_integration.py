@@ -54,7 +54,7 @@ def get_llm(provider: Optional[str] = None, params: Optional[Dict[str, Any]] = N
 
     elif provider == "qwen":
         default_params = {
-            'base_url': os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
+            'base_url': os.getenv("LLM_BASE_URL", "http://100.122.155.85:11434/v1"),
             'api_key': os.getenv("LLM_API_KEY", "ollama"),
             'model': os.getenv("LLM_MODEL", "qwen2.5:14b"),
             'temperature': 0.1,

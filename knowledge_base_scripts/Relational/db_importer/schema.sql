@@ -248,3 +248,11 @@ COMMENT ON TABLE eco_assistant.resource_resource_link IS 'Связи между 
 ALTER TABLE eco_assistant.resource_value
     ADD CONSTRAINT fk_resource_value_resource
     FOREIGN KEY (resource_id) REFERENCES eco_assistant.resource(id) ON DELETE CASCADE;
+
+-- Добавление типов объектов по умолчанию
+INSERT INTO eco_assistant.object_type (name, schema) VALUES 
+('Объект флоры и фауны', '{}'),
+('Географический объект', '{}'),
+('Услуга', '{}'),
+('Экспонат', '{}')
+ON CONFLICT (name) DO NOTHING;

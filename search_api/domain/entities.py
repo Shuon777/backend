@@ -1,3 +1,4 @@
+# search_api/domain/entities.py
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
@@ -7,6 +8,7 @@ class ObjectCriteria:
     db_id: Optional[str] = None
     name_synonyms: Optional[Dict[str, List[str]]] = None
     properties: Optional[Dict[str, Any]] = None
+    object_type: Optional[str] = None
 
 
 @dataclass
@@ -26,6 +28,13 @@ class SearchRequest:
     object: Optional[ObjectCriteria] = None
     resource: Optional[ResourceCriteria] = None
     modality_type: Optional[str] = None
+    limit: int = 20
+    offset: int = 0
+    debug: bool = False
+    search_type: str = "Relational"
+    use_llm_answer: bool = False
+    user_query: Optional[str] = None
+    clean_user_query: Optional[str] = None
 
 
 @dataclass
@@ -56,3 +65,5 @@ class SearchResponse:
     modality_filter: Optional[str]
     objects: List[ObjectResult]
     resources: List[ResourceResult]
+    debug_info: Optional[Dict[str, Any]] = None
+    llm_answer: Optional[Dict[str, Any]] = None
