@@ -19,7 +19,10 @@ def _get_use_case():
     if not cache:
         cache = RedisCache(config.redis_host, config.redis_port, config.redis_db)
     
-    repository = PostgresSearchRepository(config)
+    repository = current_app.config.get('SEARCH_REPOSITORY')
+    if not repository:
+        repository = PostgresSearchRepository(config)
+    
     search_use_case = SearchUseCase(repository)
     geo_service = GeoMapService(config.maps_dir, config.domain)
     llm_generator = LLMAnswerGenerator()
@@ -29,9 +32,12 @@ def _get_use_case():
 
 @search_bp.route('/search', methods=['POST'])
 def search():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({'error': 'Invalid JSON'}), 400
+    
     if not data:
-        return jsonify({'error': 'Request body required'}), 400
+        data = {}
 
     sys_params = data.get('system_parameters', {})
     limit = sys_params.get('limit', data.get('limit', 20))

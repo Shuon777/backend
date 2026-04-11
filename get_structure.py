@@ -1,7 +1,7 @@
 import os
 
 def list_files(startpath, output_file):
-    excluded_dirs = {'node_modules', '.next', '.git','public','__pycache__','pgvector'}
+    excluded_dirs = {'node_modules', '.next', '.git','public','__pycache__','pgvector','.venv','images'}
     
     with open(output_file, 'w', encoding='utf-8') as f:
         for root, dirs, files in os.walk(startpath):

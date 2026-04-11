@@ -159,3 +159,9 @@ yargy==0.16.0
 yarl==1.20.1
 zstandard==0.23.0
 langchain_openai
+pytest==8.0.0
+pytest-cov==4.1.0
+pytest-env==1.1.3
+pytest-mock==3.12.0
+factory-boy==3.3.0
+faker==20.0.0
