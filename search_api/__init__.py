@@ -1,13 +1,15 @@
-# search_api/__init__.py
 from .routes.search import search_bp
 from .config import SearchConfig
-from .domain.entities import SearchRequest, SearchResponse
-from .use_cases.search_service import SearchUseCase
+from .domain.entities import SearchRequest, SearchResponse, ObjectCriteria, ResourceCriteria
+from .use_cases import SearchUseCase, SearchAndBuildUseCase
 
 __all__ = [
     'search_bp',
     'SearchConfig',
     'SearchRequest',
     'SearchResponse',
-    'SearchUseCase'
+    'SearchUseCase',
+    'SearchAndBuildUseCase',
+    'ObjectCriteria',
+    'ResourceCriteria'
 ]

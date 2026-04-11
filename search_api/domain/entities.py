@@ -1,4 +1,3 @@
-# search_api/domain/entities.py
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
@@ -9,6 +8,14 @@ class ObjectCriteria:
     name_synonyms: Optional[Dict[str, List[str]]] = None
     properties: Optional[Dict[str, Any]] = None
     object_type: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'db_id': self.db_id,
+            'name_synonyms': self.name_synonyms,
+            'properties': self.properties,
+            'object_type': self.object_type,
+        }
 
 
 @dataclass
@@ -21,6 +28,18 @@ class ResourceCriteria:
     features: Optional[Dict[str, Any]] = None
     structured_data: Optional[Dict[str, Any]] = None
     taxonomy: Optional[Dict[str, str]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'title': self.title,
+            'uri': self.uri,
+            'author': self.author,
+            'source': self.source,
+            'modality_type': self.modality_type,
+            'features': self.features,
+            'structured_data': self.structured_data,
+            'taxonomy': self.taxonomy,
+        }
 
 
 @dataclass
