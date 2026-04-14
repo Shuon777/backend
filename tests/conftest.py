@@ -182,3 +182,29 @@ def search_repository(db_client):
             domain='http://localhost:5555'
         )
     )
+    
+@pytest.fixture(scope='session')
+def production_config() -> SearchConfig:
+    return SearchConfig(
+        db_name=os.getenv('DB_NAME', 'eco'),
+        db_user=os.getenv('DB_USER', 'postgres'),
+        db_password=os.getenv('DB_PASSWORD', 'Fdf78yh0a4b!'),
+        db_host=os.getenv('DB_HOST', 'localhost'),
+        db_port=os.getenv('DB_PORT', '5432'),
+        redis_host=os.getenv('REDIS_HOST', 'localhost'),
+        redis_port=int(os.getenv('REDIS_PORT', '6379')),
+        redis_db=int(os.getenv('REDIS_DB', '1')),
+        maps_dir=os.getenv('MAPS_DIR', '/app/maps'),
+        domain=os.getenv('DOMAIN', 'http://localhost:5555')
+    )
+
+@pytest.fixture
+def production_app(production_config):
+    from api import app as flask_app
+    flask_app.config['TESTING'] = True
+    flask_app.config['SEARCH_CONFIG'] = production_config
+    return flask_app
+
+@pytest.fixture
+def production_client(production_app):
+    return production_app.test_client()
