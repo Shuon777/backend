@@ -1,7 +1,7 @@
 from .search_repository import SearchRepository
-from .database import PostgresSearchRepository
+from .sqlalchemy_repository import SQLAlchemySearchRepository
 
 __all__ = [
     'SearchRepository',
-    'PostgresSearchRepository'
+    'SQLAlchemySearchRepository'
 ]

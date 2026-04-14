@@ -1,4 +1,5 @@
 # search_api/adapters/database.py
+import logging
 import psycopg2
 import json
 from psycopg2.extras import RealDictCursor
@@ -7,9 +8,13 @@ from ..config import SearchConfig
 from ..domain.entities import ObjectResult, ResourceResult, ObjectCriteria, ResourceCriteria
 from .search_repository import SearchRepository
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.propagate = True
 
 class PostgresSearchRepository(SearchRepository):
     def __init__(self, config: SearchConfig):
+        logger.debug(f"Initializing PostgresSearchRepository with config: {config.db_host}:{config.db_port}/{config.db_name}")
         self._conn_params = {
             'dbname': config.db_name,
             'user': config.db_user,
@@ -19,10 +24,17 @@ class PostgresSearchRepository(SearchRepository):
         }
 
     def _get_conn(self):
+        logger.debug("Creating database connection")
         return psycopg2.connect(**self._conn_params, cursor_factory=RealDictCursor)
 
     def find_objects_by_criteria(self, criteria: ObjectCriteria, limit: int = 20, offset: int = 0) -> List[ObjectResult]:
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"find_objects_by_criteria START")
+        logger.info(f"criteria.properties: {criteria.properties}")
+        
         if not criteria.db_id and not criteria.name_synonyms and not criteria.properties and not criteria.object_type:
+            logger.info("No criteria provided, returning empty list")
             return []
         
         with self._get_conn() as conn:
@@ -59,13 +71,31 @@ class PostgresSearchRepository(SearchRepository):
                 
                 if criteria.properties:
                     for key, value in criteria.properties.items():
-                        sql += f" AND o.object_properties @> %s::jsonb"
-                        params.append(json.dumps({key: value}))
+                        logger.info(f"Processing {key} = {value}")
+                        
+                        if isinstance(value, str):
+                            sql += f" AND o.object_properties->'{key}' @> '\"{value}\"'::jsonb"
+                        elif isinstance(value, list):
+                            for item in value:
+                                sql += f" AND o.object_properties->'{key}' @> '\"{item}\"'::jsonb"
+                        elif isinstance(value, bool):
+                            sql += f" AND (o.object_properties->>'{key}')::boolean = {str(value).lower()}"
+                        elif isinstance(value, (int, float)):
+                            sql += f" AND (o.object_properties->>'{key}')::numeric = {value}"
+                        else:
+                            sql += f" AND o.object_properties->>'{key}' = '{str(value)}'"
                 
                 sql += " GROUP BY o.id, ot.name"
                 sql += f" LIMIT {limit} OFFSET {offset}"
+                
+                logger.info(f"SQL: {sql}")
+                logger.info(f"Params: {params}")
+                
                 cur.execute(sql, params)
                 rows = cur.fetchall()
+                
+                logger.info(f"Found {len(rows)} rows")
+                
                 return [
                     ObjectResult(
                         id=r['id'],
@@ -75,7 +105,7 @@ class PostgresSearchRepository(SearchRepository):
                         synonyms=r['synonyms'] or []
                     ) for r in rows
                 ]
-
+                                                                          
     def find_resources_by_criteria(self, criteria: ResourceCriteria, object_ids: Optional[List[int]] = None, limit: int = 50, offset: int = 0) -> List[ResourceResult]:
         with self._get_conn() as conn:
             with conn.cursor() as cur:

@@ -1,12 +1,14 @@
+import logging
 from flask import request, jsonify, Blueprint, current_app
 
 from ..config import SearchConfig
-from ..adapters.database import PostgresSearchRepository
+from ..adapters.sqlalchemy_repository import SQLAlchemySearchRepository
 from ..use_cases import SearchUseCase, SearchAndBuildUseCase
 from ..domain.entities import SearchRequest, ObjectCriteria, ResourceCriteria
 from ..services import GeoMapService, LLMAnswerGenerator, ResponseBuilder
-from ..infrastructure import RedisCache
+from ..infrastructure import RedisCache, init_db, get_session
 
+logger = logging.getLogger(__name__)
 search_bp = Blueprint('search_api', __name__)
 
 
@@ -19,9 +21,9 @@ def _get_use_case():
     if not cache:
         cache = RedisCache(config.redis_host, config.redis_port, config.redis_db)
     
-    repository = current_app.config.get('SEARCH_REPOSITORY')
-    if not repository:
-        repository = PostgresSearchRepository(config)
+    init_db(config)
+    session_factory = get_session
+    repository = SQLAlchemySearchRepository(session_factory)
     
     search_use_case = SearchUseCase(repository)
     geo_service = GeoMapService(config.maps_dir, config.domain)
@@ -32,6 +34,7 @@ def _get_use_case():
 
 @search_bp.route('/search', methods=['POST'])
 def search():
+    logger.info("Search endpoint called")
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({'error': 'Invalid JSON'}), 400
@@ -58,7 +61,7 @@ def search():
             properties=obj.get('properties'),
             object_type=obj.get('object_type')
         )
-
+    logger.info(f"Object criteria properties: {object_criteria.properties}")
     resource_criteria = None
     if search_params.get('resource'):
         res = search_params['resource']
