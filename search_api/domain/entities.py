@@ -72,7 +72,7 @@ class ResourceResult:
     uri: Optional[str]
     author: Optional[str]
     source: Optional[str]
-    modality_type: str
+    modality_type: Optional[str]
     content: Any
     features: Optional[Dict[str, Any]] = None
 

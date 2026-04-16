@@ -12,6 +12,7 @@ for logger_name in ['search_api', 'search_api.adapters', 'search_api.use_cases',
     logging.getLogger(logger_name).setLevel(logging.DEBUG)
     logging.getLogger(logger_name).propagate = True
 
+logging.getLogger('sqlalchemy.engine').setLevel(logging.DEBUG)
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('werkzeug').setLevel(logging.INFO)

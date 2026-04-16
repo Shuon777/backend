@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass
 
@@ -6,6 +7,7 @@ from ..infrastructure.redis_cache import RedisCache
 from ..services.response_builder import ResponseBuilder
 from .search_use_case import SearchUseCase
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchAndBuildUseCase:
@@ -15,10 +17,15 @@ class SearchAndBuildUseCase:
     _cache_ttl: int = 3600
 
     def execute(self, request: SearchRequest) -> dict:
-        cache_key = RedisCache.generate_key('search_response', self._cache_params(request))
-        cache_hit, cached = self._cache.get(cache_key)
-        if cache_hit:
-            return cached
+        if not request.debug:
+            cache_key = RedisCache.generate_key('search_response', self._cache_params(request))
+            cache_hit, cached = self._cache.get(cache_key)
+            if cache_hit:
+                logger.info("=== CACHE HIT, returning cached result ===")
+                return cached
+            logger.info("=== CACHE MISS, executing search ===")
+        else:
+            logger.info("=== DEBUG MODE, skipping cache ===")
 
         start_time = time.time()
         search_response = self._search_use_case.execute(request)
@@ -36,8 +43,9 @@ class SearchAndBuildUseCase:
         
         if request.debug:
             result['debug'] = search_response.debug_info
-
-        self._cache.set(cache_key, result, expire_seconds=self._cache_ttl)
+        elif not request.debug:
+            self._cache.set(cache_key, result, expire_seconds=self._cache_ttl)
+        
         return result
 
     def _cache_params(self, request: SearchRequest) -> dict:

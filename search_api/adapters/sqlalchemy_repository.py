@@ -1,12 +1,14 @@
 import logging
 from typing import List, Optional
 from sqlalchemy.orm import joinedload
-from sqlalchemy import func
+from sqlalchemy import func,literal
+from sqlalchemy.dialects import postgresql
 from ..domain.entities import ObjectResult, ResourceResult, ObjectCriteria, ResourceCriteria
 from .search_repository import SearchRepository
 from ..infrastructure.orm.object_models import Object, ObjectNameSynonym, ObjectType
 from ..infrastructure.orm.resource_models import Resource, Bibliographic, Author, Source, ResourceStatic
 from ..infrastructure.orm.modality_models import Modality, TextValue, ImageValue, GeodataValue, ResourceValue
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,19 +36,32 @@ class SQLAlchemySearchRepository(SearchRepository):
                     query = query.filter(Object.synonyms.any(ObjectNameSynonym.synonym.in_(names)))
             if criteria.properties:
                 for key, value in criteria.properties.items():
-                    if isinstance(value, str):
-                        query = query.filter(Object.object_properties[key].op('@>')(func.jsonb_build_array(value)))
-                    elif isinstance(value, list):
-                        for item in value:
-                            query = query.filter(Object.object_properties[key].op('@>')(func.jsonb_build_array(item)))
-                    elif isinstance(value, bool):
-                        query = query.filter(Object.object_properties[key].as_boolean() == value)
-                    elif isinstance(value, (int, float)):
-                        query = query.filter(Object.object_properties[key].as_float() == value)
+                    if key == 'subtypes':
+                        if isinstance(value, str):
+                            query = query.filter(Object.object_properties[key].op('?')(value))
+                        elif isinstance(value, list):
+                            for item in value:
+                                query = query.filter(Object.object_properties[key].op('?')(item))
+                        else:
+                            query = query.filter(Object.object_properties[key].as_string() == str(value))
                     else:
-                        query = query.filter(Object.object_properties[key].as_string() == str(value))
+                        if isinstance(value, str):
+                            query = query.filter(Object.object_properties[key].as_string() == value)
+                        elif isinstance(value, list):
+                            for item in value:
+                                query = query.filter(Object.object_properties[key].as_string() == item)
+                        elif isinstance(value, bool):
+                            query = query.filter(Object.object_properties[key].as_boolean() == value)
+                        elif isinstance(value, (int, float)):
+                            query = query.filter(Object.object_properties[key].as_float() == value)
+                        else:
+                            query = query.filter(Object.object_properties[key].as_string() == str(value))
             
             query = query.limit(limit).offset(offset)
+            
+            compiled = query.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+            logger.info(f"Executing query: {compiled}")
+            
             objects = query.all()
             
             return [
@@ -58,11 +73,19 @@ class SQLAlchemySearchRepository(SearchRepository):
                     synonyms=[s.synonym for s in obj.synonyms]
                 ) for obj in objects
             ]
-
+            
     def find_resources_by_criteria(self, criteria: ResourceCriteria, object_ids: Optional[List[int]] = None, limit: int = 50, offset: int = 0) -> List[ResourceResult]:
         session = self._session_factory()
         with session:
-            query = session.query(Resource).outerjoin(ResourceStatic, Resource.resource_static_id == ResourceStatic.id).outerjoin(Bibliographic, ResourceStatic.bibliographic_id == Bibliographic.id).outerjoin(Author, Bibliographic.author_id == Author.id).outerjoin(Source, Bibliographic.source_id == Source.id)
+            query = session.query(Resource).outerjoin(
+                ResourceStatic, Resource.resource_static_id == ResourceStatic.id
+            ).outerjoin(
+                Bibliographic, ResourceStatic.bibliographic_id == Bibliographic.id
+            ).outerjoin(
+                Author, Bibliographic.author_id == Author.id
+            ).outerjoin(
+                Source, Bibliographic.source_id == Source.id
+            )
             
             if object_ids:
                 query = query.filter(Resource.objects.any(Object.id.in_(object_ids)))
@@ -75,7 +98,7 @@ class SQLAlchemySearchRepository(SearchRepository):
             if criteria.source:
                 query = query.filter(Source.name.ilike(f"%{criteria.source}%"))
             if criteria.modality_type:
-                query = query.filter(Resource.resource_values.any(modality.has(modality_type=criteria.modality_type)))
+                query = query.filter(Resource.resource_values.any(Modality.modality_type == criteria.modality_type))
             if criteria.features:
                 for key, val in criteria.features.items():
                     query = query.filter(Resource.features[key].as_string() == str(val))
