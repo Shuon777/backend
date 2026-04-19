@@ -5,13 +5,13 @@ pytestmark = pytest.mark.regression
 
 class TestSearchEndpointRegression:
     def test_museums_search_first_6_results(self, production_client):
-        """TC-01: Поиск музеев - проверка первых 6 объектов"""
         request_body = {
             "system_parameters": {
                 "user_query": "Сколько музеев?",
                 "use_llm_answer": False,
                 "limit": 6,
-                "offset": 0
+                "offset": 0,
+                "debug": True
             },
             "search_parameters": {
                 "object": {
@@ -27,6 +27,7 @@ class TestSearchEndpointRegression:
         assert response.status_code == 200
         data = response.get_json()
         
+        assert 'debug' in data
         assert 'objects' in data
         assert len(data['objects']) == 6
         
@@ -36,13 +37,13 @@ class TestSearchEndpointRegression:
         assert actual_ids == expected_ids
 
     def test_bodaybo_museum_search(self, production_client):
-        """TC-02: Поиск музеев в Бодайбо с текстовыми ресурсами"""
         request_body = {
             "system_parameters": {
                 "user_query": "Расскажи о музеях в Бодайбо",
                 "use_llm_answer": False,
-                "limit": 10,
-                "offset": 0
+                "limit": 6,
+                "offset": 0,
+                "debug": True
             },
             "search_parameters": {
                 "object": {
@@ -65,13 +66,15 @@ class TestSearchEndpointRegression:
         assert response.status_code == 200
         data = response.get_json()
         
+        assert 'debug' in data
+        
         museum = data['objects'][0]
-        assert museum['id'] == 6899, "ID объекта должен быть 6899"
+        assert museum['id'] == 6899
         assert museum['db_id'] == "GEO_OBJ_123acf0dbc28"
 
         resource = data['resources'][0]
         assert resource['modality_type'] == "Текст"
-        assert resource['id'] == 16959, "ID ресурса должен быть 16959"
+        assert resource['id'] == 16959
         assert resource['title'] == "Бодайбинский городской краеведческий музей имени В. Ф. Верещагина"
         assert resource['source'] == "Байкальский музей СО РАН"
         
@@ -80,4 +83,49 @@ class TestSearchEndpointRegression:
         assert 'content' in structured_data
         assert "Краеведческий музей" in structured_data['content']
 
-        assert 'debug' in data, "Debug режим должен быть включен"
+    def test_scientific_institutions_near_baikal(self, production_client):
+        request_body = {
+            "system_parameters": {
+                "user_query": "Какие научные учреждения есть около Байкала?",
+                "use_llm_answer": False,
+                "limit": 6,
+                "offset": 0,
+                "debug": True
+            },
+            "search_parameters": {
+                "object": {
+                    "properties": {
+                        "subtypes": "Наука"
+                    }
+                },
+                "modality_type": "Текст"
+            }
+        }
+        
+        response = production_client.post('/search', json=request_body)
+        
+        assert response.status_code == 200
+        data = response.get_json()
+        
+        assert 'debug' in data
+        assert 'objects' in data
+        assert len(data['objects']) > 0
+        
+        for obj in data['objects']:
+            props = obj.get('properties', {})
+            subtypes = props.get('subtypes')
+            if isinstance(subtypes, str):
+                subtypes = [subtypes]
+            assert subtypes is not None
+            assert "Наука" in subtypes
+        
+        has_baikal = False
+        for obj in data['objects']:
+            props = obj.get('properties', {})
+            location = props.get('exact_location', '')
+            name = props.get('name', '')
+            combined = (location + ' ' + name).lower()
+            if 'байкал' in combined:
+                has_baikal = True
+                break
+        assert has_baikal
