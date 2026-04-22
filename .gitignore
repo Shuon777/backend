@@ -95,3 +95,4 @@ knowledge_base_scripts/Relational/pgvector/
 **/OFF.xlsx
 
 **/knowledge_base_scripts/Vector/faiss_index/
+embedding_models.tar.gz

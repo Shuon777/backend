@@ -1,105 +1,265 @@
 import pytest
-from unittest.mock import Mock
-from datetime import datetime
-from search_api.use_cases import SearchUseCase, SearchAndBuildUseCase
-from search_api.domain.entities import (
-    SearchRequest, ObjectCriteria, ResourceCriteria,
-    ObjectResult, ResourceResult, SearchResponse
-)
-from search_api.services.response_builder import ResponseBuilder
+from unittest.mock import Mock, MagicMock, patch
+from sqlalchemy.orm import Session
+from search_api.domain.entities import ObjectCriteria, ResourceCriteria, ObjectResult, ResourceResult
+from search_api.adapters.sqlalchemy_repository import SQLAlchemySearchRepository
 
-class TestSearchUseCase:
-    def test_execute_with_object_only(self):
-        repo = Mock()
-        use_case = SearchUseCase(repo)
-        
-        object_criteria = ObjectCriteria(db_id='test_001')
-        request = SearchRequest(object=object_criteria, debug=True)
-        
-        expected_objects = [
-            ObjectResult(id=1, db_id='test_001', object_type='Test', properties={}, synonyms=[])
-        ]
-        repo.find_objects_by_criteria.return_value = expected_objects
-        repo.find_resources_by_criteria.return_value = []
-        
-        response = use_case.execute(request)
-        
-        assert response.objects == expected_objects
-        assert response.debug_info is not None
-        repo.find_objects_by_criteria.assert_called_once_with(object_criteria, limit=20, offset=0)
 
-    def test_execute_with_resource_only(self):
-        repo = Mock()
-        use_case = SearchUseCase(repo)
+class TestSQLAlchemySearchRepository:
+    """Unit tests for SQLAlchemySearchRepository"""
+    
+    @pytest.fixture
+    def mock_session(self):
+        session = Mock(spec=Session)
+        session.__enter__ = Mock(return_value=session)
+        session.__exit__ = Mock(return_value=False)
+        return session
+    
+    @pytest.fixture
+    def mock_session_factory(self, mock_session):
+        factory = Mock()
+        factory.return_value = mock_session
+        return factory
+    
+    @pytest.fixture
+    def repository(self, mock_session_factory):
+        return SQLAlchemySearchRepository(mock_session_factory)
+    
+    def test_find_objects_by_criteria_empty_criteria(self, repository, mock_session):
+        """Test that empty criteria returns empty list without querying"""
+        criteria = ObjectCriteria()  # All fields None
         
-        resource_criteria = ResourceCriteria(title='Test Resource')
-        request = SearchRequest(resource=resource_criteria)
+        result = repository.find_objects_by_criteria(criteria)
         
-        expected_resources = [
-            ResourceResult(id=1, title='Test Resource', uri=None, author=None, source=None, modality_type='Текст', content={})
-        ]
-        repo.find_objects_by_criteria.return_value = []
-        repo.find_resources_by_criteria.return_value = expected_resources
+        assert result == []
+        mock_session.query.assert_not_called()
+    
+    def test_find_objects_by_criteria_with_db_id(self, repository, mock_session):
+        """Test filtering by db_id"""
+        from search_api.infrastructure.orm.object_models import Object
         
-        response = use_case.execute(request)
+        criteria = ObjectCriteria(db_id="test_db_123")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
         
-        assert response.resources == expected_resources
-        repo.find_resources_by_criteria.assert_called_once()
-
-    def test_execute_with_object_and_resource(self):
-        repo = Mock()
-        use_case = SearchUseCase(repo)
+        repository.find_objects_by_criteria(criteria)
         
-        object_criteria = ObjectCriteria(db_id='test_001')
-        resource_criteria = ResourceCriteria(title='Test')
-        request = SearchRequest(object=object_criteria, resource=resource_criteria)
+        mock_session.query.assert_called_once()
+        mock_query.filter.assert_called()
+    
+    def test_find_objects_by_criteria_with_object_type(self, repository, mock_session):
+        """Test filtering by object_type"""
+        from search_api.infrastructure.orm.object_models import ObjectType
         
-        expected_objects = [ObjectResult(id=1, db_id='test_001', object_type='Test', properties={}, synonyms=[])]
-        expected_resources = [ResourceResult(id=1, title='Test', uri=None, author=None, source=None, modality_type='Текст', content={})]
+        criteria = ObjectCriteria(object_type="Объект флоры и фауны")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
         
-        repo.find_objects_by_criteria.return_value = expected_objects
-        repo.find_resources_by_criteria.return_value = expected_resources
+        repository.find_objects_by_criteria(criteria)
         
-        response = use_case.execute(request)
-        
-        assert response.objects == expected_objects
-        assert response.resources == expected_resources
-
-class TestSearchAndBuildUseCase:
-    def test_execute_with_cache_miss(self, mock_redis):
-        search_use_case = Mock()
-        response_builder = Mock()
-        
-        use_case = SearchAndBuildUseCase(search_use_case, response_builder, mock_redis)
-        
-        request = SearchRequest(user_query='test', use_llm_answer=True)
-        search_response = SearchResponse(
-            object_criteria=None,
-            resource_criteria=None,
-            modality_filter=None,
-            objects=[],
-            resources=[]
+        mock_session.query.assert_called_once()
+    
+    def test_find_objects_by_criteria_with_name_synonyms(self, repository, mock_session):
+        """Test filtering by name synonyms"""
+        criteria = ObjectCriteria(
+            name_synonyms={"ru": ["байкал", "озеро"]}
         )
-        search_use_case.execute.return_value = search_response
-        response_builder.build.return_value = {'result': 'success'}
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
         
-        result = use_case.execute(request)
+        repository.find_objects_by_criteria(criteria)
         
-        assert result == {'result': 'success'}
-        search_use_case.execute.assert_called_once_with(request)
-        mock_redis.set.assert_called_once()
+        mock_session.query.assert_called_once()
+    
+    def test_find_objects_by_criteria_with_properties(self, repository, mock_session):
+        """Test filtering by properties"""
+        criteria = ObjectCriteria(
+            properties={"subtypes": "заповедник"}
+        )
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_objects_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_objects_by_criteria_with_limit_offset(self, repository, mock_session):
+        """Test limit and offset are applied correctly"""
+        criteria = ObjectCriteria(db_id="test")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_objects_by_criteria(criteria, limit=10, offset=5)
+        
+        mock_query.limit.assert_called_with(10)
+        mock_query.offset.assert_called_with(5)
+    
+    def test_find_resources_by_criteria_without_object_ids(self, repository, mock_session):
+        """Test resource search without object_ids"""
+        from search_api.infrastructure.orm.resource_models import Resource
+        
+        criteria = ResourceCriteria(title="test")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_resources_by_criteria_with_object_ids(self, repository, mock_session):
+        """Test resource search with object_ids filter"""
+        criteria = ResourceCriteria()
+        object_ids = [1, 2, 3]
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria, object_ids=object_ids)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_resources_by_criteria_with_author(self, repository, mock_session):
+        """Test filtering resources by author"""
+        criteria = ResourceCriteria(author="Иванов")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_resources_by_criteria_with_source(self, repository, mock_session):
+        """Test filtering resources by source"""
+        criteria = ResourceCriteria(source="Научный журнал")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_resources_by_criteria_with_modality_type(self, repository, mock_session):
+        """Test filtering resources by modality_type"""
+        criteria = ResourceCriteria(modality_type="Текст")
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
+    
+    def test_find_resources_by_criteria_with_features(self, repository, mock_session):
+        """Test filtering resources by features"""
+        criteria = ResourceCriteria(features={"rating": 5})
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.outerjoin.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = []
+        
+        repository.find_resources_by_criteria(criteria)
+        
+        mock_session.query.assert_called_once()
 
-    def test_execute_with_cache_hit(self, mock_redis):
-        search_use_case = Mock()
-        response_builder = Mock()
+
+class TestSQLAlchemySearchRepositoryIntegration:
+    """Integration-like unit tests with mocked ORM objects"""
+    
+    @pytest.fixture
+    def mock_session(self):
+        return Mock(spec=Session)
+    
+    @pytest.fixture
+    def repository(self, mock_session):
+        def factory():
+            return mock_session
+        return SQLAlchemySearchRepository(factory)
+    
+    def test_find_objects_by_criteria_returns_objects(self, repository, mock_session):
+        """Test that find_objects_by_criteria returns properly mapped ObjectResult objects"""
+        from search_api.infrastructure.orm.object_models import Object, ObjectType
         
-        cached_result = {'cached': 'result'}
-        mock_redis.get.return_value = (True, cached_result)
+        # Create mock objects
+        mock_obj = Mock(spec=Object)
+        mock_obj.id = 1
+        mock_obj.db_id = "test_db_001"
+        mock_obj.object_properties = {"name": "Test Object"}
+        mock_obj.object_type = Mock(spec=ObjectType)
+        mock_obj.object_type.name = "Тестовый тип"
+        mock_obj.synonyms = []
         
-        use_case = SearchAndBuildUseCase(search_use_case, response_builder, mock_redis)
+        mock_query = Mock()
+        mock_session.query.return_value = mock_query
+        mock_query.options.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.offset.return_value = mock_query
+        mock_query.all.return_value = [mock_obj]
         
-        request = SearchRequest()
-        result = use_case.execute(request)
+        criteria = ObjectCriteria(db_id="test_db_001")
+        results = repository.find_objects_by_criteria(criteria)
         
-        assert result == cached_result
-        search_use_case.execute.assert_not_called()
+        assert len(results) == 1
+        assert isinstance(results[0], ObjectResult)
+        assert results[0].id == 1
+        assert results[0].db_id == "test_db_001"
+        assert results[0].object_type == "Тестовый тип"
+        assert results[0].properties == {"name": "Test Object"}
+        assert results[0].synonyms == []

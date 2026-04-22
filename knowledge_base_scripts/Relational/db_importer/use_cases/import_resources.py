@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 import hashlib
 import json
+from pathlib import Path
 
 from ..domain.entities import (
     Resource,
@@ -40,10 +41,12 @@ class ImportResourcesUseCase:
     modality_repo: ModalityRepository
     geodata_provider: GeodataProvider
     feature_repo: ResourceFeatureRepository
+    missing_geometry_file: Path = Path(__file__).parent.parent.parent / 'missing_geometry.json'
 
     _logger = logging.getLogger(__name__)
 
     def execute(self, resources_data: List[Dict[str, Any]], incremental: bool = False) -> Dict[str, int]:
+        self._reset_missing_geometry_file()
         result = {'success': 0, 'skipped': 0, 'errors': 0}
         resource_relations_to_process = []
 
@@ -85,6 +88,28 @@ class ImportResourcesUseCase:
 
         self._logger.info(f"Resources import: success={result['success']}, skipped={result['skipped']}, errors={result['errors']}")
         return result
+
+    def _reset_missing_geometry_file(self) -> None:
+        try:
+            self.missing_geometry_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.missing_geometry_file, 'w', encoding='utf-8') as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._logger.error(f"Failed to reset missing_geometry.json: {e}")
+
+    def _add_missing_geometry(self, geodb_id: str) -> None:
+        try:
+            existing_data = []
+            if self.missing_geometry_file.exists():
+                with open(self.missing_geometry_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+
+            if geodb_id not in existing_data:
+                existing_data.append(geodb_id)
+                with open(self.missing_geometry_file, 'w', encoding='utf-8') as f:
+                    json.dump(existing_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._logger.error(f"Failed to add missing geometry: {e}")
 
     def _import_single_resource(self, resource_data: Dict[str, Any], resource_hash: Optional[str] = None) -> Optional[int]:
         title = resource_data.get('title')
@@ -168,8 +193,6 @@ class ImportResourcesUseCase:
                 obj = self.object_repo.find_by_db_id_only(object_db_id)
                 if obj:
                     self.resource_repo.link_resource_to_object(resource_id, obj.id, relation_type)
-                else:
-                    self._logger.warning(f"Object not found for db_id: {object_db_id}")
 
         return resource_id
 
@@ -205,18 +228,18 @@ class ImportResourcesUseCase:
         elif modality_type in ("Геоданные", "Картографическая информация"):
             modality = self.modality_repo.get_or_create_modality('Геоданные', 'geodata_value')
             geodb_id = modality_value.get('geodb_id')
-            geometry_type = modality_value.get('geometry_type')
             if geodb_id:
-                geometry = self.geodata_provider.get_geometry(geodb_id)
-                if geometry:
+                geometry_data = self.geodata_provider.get_geometry(geodb_id)
+                if geometry_data:
+                    geometry, normalized_type = geometry_data
                     geodata_value = GeodataValue(
-                        geometry=geometry[0],
-                        geometry_type=geometry_type or geometry[1]
+                        geometry=geometry,
+                        geometry_type=normalized_type
                     )
                     value_id = self.modality_repo.save_geodata_value(geodata_value)
                     self.modality_repo.link_resource_value(resource_id, modality.id, value_id)
                 else:
-                    self._logger.warning(f"Geometry not found for geodb_id: {geodb_id}")
+                    self._add_missing_geometry(geodb_id)
             else:
                 self._logger.warning("Geodata modality without geodb_id")
 

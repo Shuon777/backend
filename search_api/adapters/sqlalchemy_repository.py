@@ -98,7 +98,7 @@ class SQLAlchemySearchRepository(SearchRepository):
             if criteria.source:
                 query = query.filter(Source.name.ilike(f"%{criteria.source}%"))
             if criteria.modality_type:
-                query = query.filter(Resource.resource_values.any(Modality.modality_type == criteria.modality_type))
+                query = query.join(Resource.resource_values).join(ResourceValue.modality).filter(Modality.modality_type == criteria.modality_type)
             if criteria.features:
                 for key, val in criteria.features.items():
                     query = query.filter(Resource.features[key].as_string() == str(val))
@@ -111,17 +111,23 @@ class SQLAlchemySearchRepository(SearchRepository):
                 if rv and rv.modality:
                     mt = rv.modality.modality_type
                     if mt == 'Текст' and rv.value_id:
-                        tv = session.query(TextValue).get(rv.value_id)
-                        content = {'structured_data': tv.structured_data} if tv else None
+                        tv = session.get(TextValue, rv.value_id)
+                        if tv:
+                            content = {'structured_data': tv.structured_data}
                     elif mt == 'Изображение' and rv.value_id:
-                        iv = session.query(ImageValue).get(rv.value_id)
-                        content = {'url': iv.url, 'file_path': iv.file_path, 'format': iv.format} if iv else None
+                        iv = session.get(ImageValue, rv.value_id)
+                        if iv:
+                            content = {
+                                'url': iv.url,
+                                'file_path': iv.file_path,
+                                'format': iv.format
+                            }
                     elif mt == 'Геоданные' and rv.value_id:
-                        gv = session.query(GeodataValue).get(rv.value_id)
+                        gv = session.get(GeodataValue, rv.value_id)
                         if gv:
-                            from geoalchemy2.shape import to_shape
-                            geom = to_shape(gv.geometry)
-                            content = {'geojson': geom.__geo_interface__, 'type': gv.geometry_type}
+                            geo_content = self._serialize_geo_content(gv, r.id)
+                            if geo_content:
+                                content = geo_content
                 
                 author_name = None
                 source_name = None
@@ -140,3 +146,19 @@ class SQLAlchemySearchRepository(SearchRepository):
                     features=r.features
                 ))
             return result
+        
+    def _serialize_geo_content(self, geodata_value, resource_id: int):
+        if not geodata_value:
+            return None
+        try:
+            from geoalchemy2.shape import to_shape
+            geom = to_shape(geodata_value.geometry)
+            geojson = geom.__geo_interface__
+            geometry_type = getattr(geodata_value, 'geometry_type', None) or geom.geom_type
+            return {
+                'type': geojson.get('type', geometry_type),
+                'coordinates': geojson.get('coordinates', [])
+            }
+        except Exception as e:
+            logger.error(f"Failed to serialize geo content for resource {resource_id}: {e}")
+            return None

@@ -29,7 +29,20 @@ class GeoMapService:
                 continue
 
     def generate_static_map(self, geojson: Dict[str, Any], name: str) -> str:
-        geom = shape(geojson)
+        if not isinstance(geojson, dict):
+            return ""
+        if 'type' not in geojson:
+            return ""
+        if 'coordinates' in geojson:
+            coords = geojson['coordinates']
+            if isinstance(coords, tuple):
+                geojson['coordinates'] = list(coords)
+        else:
+            return ""
+        try:
+            geom = shape(geojson)
+        except Exception:
+            return ""
         if geom.is_empty:
             return ""
 
@@ -50,13 +63,13 @@ class GeoMapService:
             if g.geom_type == "Point":
                 gdf_point = gpd.GeoDataFrame([row], crs=gdf.crs)
                 gdf_point.plot(ax=ax, marker='o', markersize=30,
-                              color='red', edgecolor='darkred',
-                              linewidth=1, alpha=0.7, zorder=10)
+                            color='red', edgecolor='darkred',
+                            linewidth=1, alpha=0.7, zorder=10)
             else:
                 gdf_poly = gpd.GeoDataFrame([row], crs=gdf.crs)
                 gdf_poly.plot(ax=ax, facecolor='white',
-                             edgecolor='darkblue', linewidth=2,
-                             alpha=0.5, zorder=5)
+                            edgecolor='darkblue', linewidth=2,
+                            alpha=0.5, zorder=5)
 
         if geometries:
             bounds = gdf.total_bounds
@@ -70,29 +83,45 @@ class GeoMapService:
         filename = f"{name}.jpeg"
         filepath = os.path.join(self.maps_dir, filename)
         plt.savefig(filepath, format='jpeg', dpi=150,
-                   bbox_inches='tight', pad_inches=0)
+                bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
         return f"{self.domain}/maps/{filename}"
 
+
     def generate_interactive_map(self, geojson: Dict[str, Any], name: str) -> str:
-        geom = shape(geojson)
+        if not isinstance(geojson, dict) or 'type' not in geojson:
+            return ""
+        if 'coordinates' in geojson:
+            coords = geojson['coordinates']
+            if isinstance(coords, tuple):
+                geojson['coordinates'] = list(coords)
+        else:
+            return ""
+        try:
+            geom = shape(geojson)
+        except Exception:
+            return ""
         centroid = geom.centroid
         m = folium.Map(location=[centroid.y, centroid.x],
-                      zoom_start=9, tiles='OpenStreetMap',
-                      attributionControl=False)
+                    zoom_start=9, tiles='OpenStreetMap',
+                    attributionControl=False)
         folium.GeoJson(mapping(geom), tooltip=name, name=name).add_to(m)
         filename = f"webapp_{name}.html"
         filepath = os.path.join(self.maps_dir, filename)
         m.save(filepath)
         return f"{self.domain}/maps/{filename}"
 
+
     def enrich_geo_content(self, geojson: Dict[str, Any], name: str) -> GeoContent:
         static_url = self.generate_static_map(geojson, name)
         interactive_url = self.generate_interactive_map(geojson, name)
-        geom = shape(geojson)
+        try:
+            geom = shape(geojson)
+        except Exception:
+            geom = None
         return GeoContent(
             geojson=geojson,
-            geometry_type=geom.geom_type,
+            geometry_type=geom.geom_type if geom else "Unknown",
             map_links=MapLinks(static=static_url, interactive=interactive_url)
         )

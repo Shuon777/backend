@@ -73,16 +73,12 @@ class ResponseBuilder:
                 'features': r.features,
             }
             if r.modality_type == ModalityType.GEODATA.value:
-                if isinstance(r.content, GeoContent):
-                    item['content'] = {
-                        'geojson': r.content.geojson,
-                        'geometry_type': r.content.geometry_type,
-                        'map_links': {
-                            'static': r.content.map_links.static,
-                            'interactive': r.content.map_links.interactive,
-                        }
-                    }
-                else:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Geo content for resource {r.id}: type={type(r.content)}, value={r.content}")
+                if r.content and isinstance(r.content, dict):
+                    logger.error(f"Keys: {r.content.keys()}")
+                if r.content and isinstance(r.content, dict) and 'type' in r.content and 'coordinates' in r.content:
                     enriched = self._geo_service.enrich_geo_content(r.content, f"map_{r.id}")
                     item['content'] = {
                         'geojson': enriched.geojson,
@@ -92,6 +88,8 @@ class ResponseBuilder:
                             'interactive': enriched.map_links.interactive,
                         }
                     }
+                else:
+                    item['content'] = r.content
             else:
                 item['content'] = r.content
             serialized.append(item)
