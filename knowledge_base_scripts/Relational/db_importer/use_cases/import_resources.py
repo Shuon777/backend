@@ -163,17 +163,14 @@ class ImportResourcesUseCase:
         return resource_id
     
     def _process_modality(self, resource_id: int, modality_type: str, modality_value: Dict[str, Any]) -> None:
-        if modality_type == "Текст":
+        if modality_type in ("Текст", "Text"):
             structured_data = modality_value.get('structured_data', {})
             modality = self.modality_repo.get_or_create_modality('Текст', 'text_value')
-            
             text_value = TextValue(structured_data=structured_data)
             value_id = self.modality_repo.save_text_value(text_value)
             self.modality_repo.link_resource_value(resource_id, modality.id, value_id)
-            
-        elif modality_type == "Изображение":
+        elif modality_type in ("Изображение", "Image"):
             modality = self.modality_repo.get_or_create_modality('Изображение', 'image_value')
-            
             image_value = ImageValue(
                 url=modality_value.get('url'),
                 file_path=modality_value.get('file_path'),
@@ -181,15 +178,13 @@ class ImportResourcesUseCase:
             )
             value_id = self.modality_repo.save_image_value(image_value)
             self.modality_repo.link_resource_value(resource_id, modality.id, value_id)
-            
-        elif modality_type == "Геоданные":
+        elif modality_type in ("Геоданные", "Картографическая информация"):
+            modality = self.modality_repo.get_or_create_modality('Геоданные', 'geodata_value')
             geodb_id = modality_value.get('geodb_id')
             geometry_type = modality_value.get('geometry_type')
-            
             if geodb_id:
                 geometry = self.geodata_provider.get_geometry(geodb_id)
                 if geometry:
-                    modality = self.modality_repo.get_or_create_modality('Геоданные', 'geodata_value')
                     geodata_value = GeodataValue(
                         geometry=geometry[0],
                         geometry_type=geometry_type or geometry[1]
@@ -199,8 +194,8 @@ class ImportResourcesUseCase:
                 else:
                     self._logger.warning(f"Geometry not found for geodb_id: {geodb_id}")
             else:
-                self._logger.warning(f"Geodata modality without geodb_id")
-    
+                self._logger.warning("Geodata modality without geodb_id")
+                
     def _build_features_json(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         result = {}
         for feature in features:
