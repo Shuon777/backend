@@ -159,3 +159,13 @@ class GeodataProvider(ABC):
     def get_geometry(self, geodb_id: str) -> Optional[Tuple[Dict[str, Any], str]]:
         """Returns (geometry_dict, geometry_type) or None"""
         pass
+    
+class ObjectPropertyRepository(ABC):
+    @abstractmethod
+    def add_or_update_property(self, object_type_id: int, property_name: str, values: List[str]) -> None:
+        pass
+
+class ResourceFeatureRepository(ABC):
+    @abstractmethod
+    def add_or_update_feature(self, modality_id: int, feature_name: str, values: List[str]) -> None:
+        pass

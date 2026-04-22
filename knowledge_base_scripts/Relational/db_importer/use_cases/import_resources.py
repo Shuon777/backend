@@ -1,3 +1,5 @@
+# db_importer/use_cases/import_resources.py
+
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 import logging
@@ -23,6 +25,7 @@ from .interfaces import (
     CreationRepository,
     ModalityRepository,
     GeodataProvider,
+    ResourceFeatureRepository,
 )
 
 
@@ -36,13 +39,14 @@ class ImportResourcesUseCase:
     creation_repo: CreationRepository
     modality_repo: ModalityRepository
     geodata_provider: GeodataProvider
-    
+    feature_repo: ResourceFeatureRepository
+
     _logger = logging.getLogger(__name__)
-    
+
     def execute(self, resources_data: List[Dict[str, Any]], incremental: bool = False) -> Dict[str, int]:
         result = {'success': 0, 'skipped': 0, 'errors': 0}
         resource_relations_to_process = []
-        
+
         for i, resource_data in enumerate(resources_data, 1):
             try:
                 if incremental:
@@ -52,9 +56,9 @@ class ImportResourcesUseCase:
                         continue
                 else:
                     resource_hash = None
-                
+
                 resource_id = self._import_single_resource(resource_data, resource_hash)
-                
+
                 if resource_id:
                     result['success'] += 1
                     for relation in resource_data.get('resource_relations', []):
@@ -64,11 +68,11 @@ class ImportResourcesUseCase:
                             resource_relations_to_process.append((resource_id, related_id, relation_type))
                 else:
                     result['errors'] += 1
-                    
+
             except Exception as e:
                 self._logger.error(f"Error importing resource {i}: {e}", exc_info=True)
                 result['errors'] += 1
-        
+
         for resource_id, related_id, relation_type in resource_relations_to_process:
             try:
                 related_resource_id = self.resource_repo.find_resource_by_text_id(related_id)
@@ -78,24 +82,24 @@ class ImportResourcesUseCase:
                     self._logger.warning(f"Related resource not found: {related_id}")
             except Exception as e:
                 self._logger.error(f"Error linking resources: {e}", exc_info=True)
-        
-        self._logger.info(f"Resources import completed: success={result['success']}, skipped={result['skipped']}, errors={result['errors']}")
+
+        self._logger.info(f"Resources import: success={result['success']}, skipped={result['skipped']}, errors={result['errors']}")
         return result
-    
+
     def _import_single_resource(self, resource_data: Dict[str, Any], resource_hash: Optional[str] = None) -> Optional[int]:
         title = resource_data.get('title')
         uri = resource_data.get('identificator', {}).get('uri')
         text_id = resource_data.get('identificator', {}).get('id')
-        
+
         bibliographic_data = resource_data.get('bibliographic', {})
         author = bibliographic_data.get('author')
         source = bibliographic_data.get('source')
         reliability_level = bibliographic_data.get('reliability_level')
-        
+
         author_id = self.bibliographic_repo.get_or_create_author(author) if author else None
         source_id = self.bibliographic_repo.get_or_create_source(source) if source else None
         reliability_id = self.bibliographic_repo.get_or_create_reliability_level(reliability_level) if reliability_level else None
-        
+
         bibliographic = BibliographicData(
             author_id=author_id,
             date=None,
@@ -103,7 +107,7 @@ class ImportResourcesUseCase:
             reliability_level_id=reliability_id
         )
         bibliographic_id = self.bibliographic_repo.get_or_create(bibliographic)
-        
+
         creation_data = resource_data.get('creation', {})
         creation = CreationData(
             creation_type=creation_data.get('creation_type'),
@@ -111,14 +115,14 @@ class ImportResourcesUseCase:
             creation_params=None
         )
         creation_id = self.creation_repo.get_or_create(creation)
-        
+
         resource_static = ResourceStatic(
             static_id=None,
             bibliographic_id=bibliographic_id,
             creation_id=creation_id
         )
         resource_static_id = self.resource_static_repo.get_or_create(resource_static)
-        
+
         support_metadata_data = resource_data.get('support_metadata', {})
         metadata_params = {
             'external_id': support_metadata_data.get('external_id'),
@@ -129,10 +133,10 @@ class ImportResourcesUseCase:
             metadata_params['resource_hash'] = resource_hash
         metadata = SupportMetadata(parameters=metadata_params)
         metadata_id = self.metadata_repo.get_or_create(metadata)
-        
+
         features = resource_data.get('features', [])
         features_json = self._build_features_json(features)
-        
+
         resource = Resource(
             title=title,
             uri=uri,
@@ -142,14 +146,21 @@ class ImportResourcesUseCase:
             support_metadata_id=metadata_id
         )
         resource_id = self.resource_repo.save_resource(resource)
-        
+
         modality_data = resource_data.get('modality', {})
         modality_type = modality_data.get('type')
         modality_value = modality_data.get('value', {})
-        
+
+        modality_id = None
         if modality_type:
+            modality_id = self._get_or_create_modality_by_type(modality_type)
             self._process_modality(resource_id, modality_type, modality_value)
-        
+
+        if features and modality_id:
+            extracted = self._extract_features(features)
+            for feat_name, values in extracted:
+                self.feature_repo.add_or_update_feature(modality_id, feat_name, values)
+
         for relation in resource_data.get('object_relations', []):
             object_db_id = relation.get('db_id')
             relation_type = relation.get('type')
@@ -159,16 +170,28 @@ class ImportResourcesUseCase:
                     self.resource_repo.link_resource_to_object(resource_id, obj.id, relation_type)
                 else:
                     self._logger.warning(f"Object not found for db_id: {object_db_id}")
-        
+
         return resource_id
-    
+
+    def _get_or_create_modality_by_type(self, modality_type: str) -> int:
+        if modality_type in ("Текст", "Text"):
+            modality = self.modality_repo.get_or_create_modality('Текст', 'text_value')
+        elif modality_type in ("Изображение", "Image"):
+            modality = self.modality_repo.get_or_create_modality('Изображение', 'image_value')
+        elif modality_type in ("Геоданные", "Картографическая информация"):
+            modality = self.modality_repo.get_or_create_modality('Геоданные', 'geodata_value')
+        else:
+            modality = self.modality_repo.get_or_create_modality(modality_type, 'text_value')
+        return modality.id
+
     def _process_modality(self, resource_id: int, modality_type: str, modality_value: Dict[str, Any]) -> None:
         if modality_type in ("Текст", "Text"):
-            structured_data = modality_value.get('structured_data', {})
             modality = self.modality_repo.get_or_create_modality('Текст', 'text_value')
+            structured_data = modality_value.get('structured_data', {})
             text_value = TextValue(structured_data=structured_data)
             value_id = self.modality_repo.save_text_value(text_value)
             self.modality_repo.link_resource_value(resource_id, modality.id, value_id)
+
         elif modality_type in ("Изображение", "Image"):
             modality = self.modality_repo.get_or_create_modality('Изображение', 'image_value')
             image_value = ImageValue(
@@ -178,6 +201,7 @@ class ImportResourcesUseCase:
             )
             value_id = self.modality_repo.save_image_value(image_value)
             self.modality_repo.link_resource_value(resource_id, modality.id, value_id)
+
         elif modality_type in ("Геоданные", "Картографическая информация"):
             modality = self.modality_repo.get_or_create_modality('Геоданные', 'geodata_value')
             geodb_id = modality_value.get('geodb_id')
@@ -195,7 +219,7 @@ class ImportResourcesUseCase:
                     self._logger.warning(f"Geometry not found for geodb_id: {geodb_id}")
             else:
                 self._logger.warning("Geodata modality without geodb_id")
-                
+
     def _build_features_json(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         result = {}
         for feature in features:
@@ -204,7 +228,7 @@ class ImportResourcesUseCase:
             if name and value is not None:
                 result[name] = value
         return result
-    
+
     def _calculate_hash(self, resource: Dict[str, Any]) -> str:
         data = {
             'title': resource.get('title'),
@@ -217,3 +241,30 @@ class ImportResourcesUseCase:
         return hashlib.md5(
             json.dumps(data, sort_keys=True, ensure_ascii=False).encode('utf-8')
         ).hexdigest()
+
+    def _extract_features(self, features: List[Dict[str, Any]], max_depth: int = 2) -> List[Tuple[str, List[str]]]:
+        result = []
+
+        def extract(prefix: str, value: Any, depth: int) -> None:
+            if depth > max_depth:
+                return
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    new_prefix = f"{prefix}.{k}" if prefix else k
+                    extract(new_prefix, v, depth + 1)
+            elif isinstance(value, list):
+                str_values = [str(item) for item in value if item is not None]
+                if str_values:
+                    result.append((prefix, str_values))
+            else:
+                if value is not None:
+                    result.append((prefix, [str(value)]))
+
+        for feat in features:
+            name = feat.get('name')
+            value = feat.get('value')
+            if not name:
+                continue
+            extract(name, value, 1)
+
+        return result

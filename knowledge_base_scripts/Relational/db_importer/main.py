@@ -16,6 +16,8 @@ from .adapters import (
     PostgresResourceStaticRepository,
     PostgresSupportMetadataRepository,
     PostgresSchemaRepository,
+    PostgresObjectPropertyRepository,
+    PostgresResourceFeatureRepository
 )
 from .services import JsonSpeciesNormalizer, GeodataProvider
 from .use_cases import ImportObjectsUseCase, ImportResourcesUseCase
@@ -35,16 +37,18 @@ def create_use_cases(config: DatabaseConfig, synonyms_path: Path, geodb_path: Pa
     creation_repo = PostgresCreationRepository(client)
     resource_static_repo = PostgresResourceStaticRepository(client)
     metadata_repo = PostgresSupportMetadataRepository(client)
+    property_repo = PostgresObjectPropertyRepository(client)
+    feature_repo = PostgresResourceFeatureRepository(client)
     
     species_normalizer = JsonSpeciesNormalizer(synonyms_path)
     geodata_provider = GeodataProvider(geodb_path)
-    
+
     import_objects = ImportObjectsUseCase(
         object_repo=object_repo,
         object_type_repo=object_type_repo,
-        synonym_repo=synonym_repo
+        synonym_repo=synonym_repo,
+        property_repo=property_repo
     )
-    
     import_resources = ImportResourcesUseCase(
         resource_repo=resource_repo,
         object_repo=object_repo,
@@ -53,7 +57,8 @@ def create_use_cases(config: DatabaseConfig, synonyms_path: Path, geodb_path: Pa
         bibliographic_repo=bibliographic_repo,
         creation_repo=creation_repo,
         modality_repo=modality_repo,
-        geodata_provider=geodata_provider
+        geodata_provider=geodata_provider,
+        feature_repo=feature_repo
     )
     
     return client, import_objects, import_resources

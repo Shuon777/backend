@@ -11,6 +11,8 @@ from .postgres_repositories import (
     PostgresSupportMetadataRepository,
 )
 from .schema_repository import PostgresSchemaRepository
+from .object_property_repository import PostgresObjectPropertyRepository
+from .resource_feature_repository import PostgresResourceFeatureRepository
 
 __all__ = [
     'DatabaseClient',
@@ -25,4 +27,6 @@ __all__ = [
     'PostgresResourceStaticRepository',
     'PostgresSupportMetadataRepository',
     'PostgresSchemaRepository',
+    'PostgresObjectPropertyRepository',
+    'PostgresResourceFeatureRepository'
 ]

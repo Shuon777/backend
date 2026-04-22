@@ -249,6 +249,38 @@ ALTER TABLE eco_assistant.resource_value
     ADD CONSTRAINT fk_resource_value_resource
     FOREIGN KEY (resource_id) REFERENCES eco_assistant.resource(id) ON DELETE CASCADE;
 
+-- ============================================================
+-- 17. Свойства объектов (для фильтрации)
+-- ============================================================
+CREATE TABLE eco_assistant.object_property (
+    id SERIAL PRIMARY KEY,
+    object_type_id INTEGER NOT NULL REFERENCES eco_assistant.object_type(id) ON DELETE CASCADE,
+    property_name TEXT NOT NULL,
+    property_values TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(object_type_id, property_name)
+);
+COMMENT ON TABLE eco_assistant.object_property IS 'Свойства объектов для фильтрации';
+CREATE INDEX idx_object_property_type ON eco_assistant.object_property(object_type_id);
+CREATE INDEX idx_object_property_name ON eco_assistant.object_property(property_name);
+
+-- ============================================================
+-- 18. Признаки ресурсов (для фильтрации)
+-- ============================================================
+CREATE TABLE eco_assistant.resource_feature (
+    id SERIAL PRIMARY KEY,
+    modality_id INTEGER NOT NULL REFERENCES eco_assistant.modality(id) ON DELETE CASCADE,
+    feature_name TEXT NOT NULL,
+    feature_values TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(modality_id, feature_name)
+);
+COMMENT ON TABLE eco_assistant.resource_feature IS 'Признаки ресурсов для фильтрации';
+CREATE INDEX idx_resource_feature_modality ON eco_assistant.resource_feature(modality_id);
+CREATE INDEX idx_resource_feature_name ON eco_assistant.resource_feature(feature_name);
+
 -- Добавление типов объектов по умолчанию
 INSERT INTO eco_assistant.object_type (name, schema) VALUES 
 ('Объект флоры и фауны', '{}'),
