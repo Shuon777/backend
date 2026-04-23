@@ -1,11 +1,12 @@
 import logging
+import os
 from flask import request, jsonify, Blueprint, current_app
 
 from ..config import SearchConfig
 from ..use_cases import SearchUseCase, SearchAndBuildUseCase
 from ..domain.entities import SearchRequest, ObjectCriteria, ResourceCriteria
 from ..services import GeoMapService, LLMAnswerGenerator, ResponseBuilder
-from ..infrastructure import RedisCache, init_db, get_session
+from ..infrastructure import RedisCache, init_db, get_session, FaissService
 
 logger = logging.getLogger(__name__)
 search_bp = Blueprint('search_api', __name__)
@@ -26,15 +27,27 @@ def _get_use_case():
     session_factory = get_session
     repository = SQLAlchemySearchRepository(session_factory)
     
-    logger.error(f"=== REPOSITORY TYPE: {type(repository).__name__} ===")
-    logger.error(f"=== REPOSITORY MODULE: {repository.__class__.__module__} ===")
+    faiss_service = None
+    faiss_index_path = getattr(config, 'faiss_index_path', None)
     
-    search_use_case = SearchUseCase(repository)
+    if faiss_index_path and os.path.exists(faiss_index_path):
+        faiss_service = FaissService(config)
+        logger.info(f"FAISS service initialized with index path: {faiss_index_path}")
+    else:
+        alt_path = "/var/www/salut_bot/knowledge_base_scripts/Vector/faiss_index"
+        if os.path.exists(alt_path):
+            from dataclasses import replace
+            config = replace(config, faiss_index_path=alt_path)
+            faiss_service = FaissService(config)
+            logger.info(f"FAISS service initialized with alternative path: {alt_path}")
+        else:
+            logger.warning(f"FAISS index path not found: {faiss_index_path or alt_path}")
+    
+    search_use_case = SearchUseCase(repository, faiss_service=faiss_service)
     geo_service = GeoMapService(config.maps_dir, config.domain)
     llm_generator = LLMAnswerGenerator()
     response_builder = ResponseBuilder(geo_service, llm_generator)
     return SearchAndBuildUseCase(search_use_case, response_builder, cache)
-
 
 @search_bp.route('/search', methods=['POST'])
 def search():
@@ -54,6 +67,9 @@ def search():
         use_llm = sys_params.get('use_llm_answer', data.get('use_llm_answer', False))
         user_query = sys_params.get('user_query', data.get('user_query'))
         clean_user_query = sys_params.get('clean_user_query', data.get('clean_user_query'))
+        force_vector_search = sys_params.get('force_vector_search', data.get('force_vector_search', False))
+        vector_similarity_threshold = sys_params.get('vector_similarity_threshold', data.get('vector_similarity_threshold', 0.03))
+        use_vector_fallback = sys_params.get('use_vector_fallback', data.get('use_vector_fallback', True))
 
         search_params = data.get('search_parameters', data)
 
@@ -98,9 +114,13 @@ def search():
             debug=debug,
             use_llm_answer=use_llm,
             user_query=user_query,
-            clean_user_query=clean_user_query
+            clean_user_query=clean_user_query,
+            force_vector_search=force_vector_search,
+            vector_similarity_threshold=vector_similarity_threshold,
+            use_vector_fallback=use_vector_fallback
         )
 
+        logger.info(f"FAISS params: force_vector_search={force_vector_search}, use_vector_fallback={use_vector_fallback}, threshold={vector_similarity_threshold}")
         logger.info("Creating use case...")
         use_case = _get_use_case()
         logger.info("Use case created, executing...")

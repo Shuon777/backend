@@ -1,8 +1,9 @@
+# search_api/use_cases/search_and_build_use_case.py
 import logging
 import time
 from dataclasses import dataclass
 
-from ..domain.entities import SearchRequest
+from ..domain.entities import SearchRequest, SearchResponse
 from ..infrastructure.redis_cache import RedisCache
 from ..services.response_builder import ResponseBuilder
 from .search_use_case import SearchUseCase
@@ -58,4 +59,7 @@ class SearchAndBuildUseCase:
             'use_llm': request.use_llm_answer,
             'user_query': request.user_query,
             'clean_user_query': request.clean_user_query,
+            'force_vector_search': request.force_vector_search,
+            'vector_similarity_threshold': request.vector_similarity_threshold,
+            'use_vector_fallback': request.use_vector_fallback,
         }

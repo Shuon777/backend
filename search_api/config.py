@@ -1,3 +1,4 @@
+# search_api/config.py
 import os
 from dataclasses import dataclass
 
@@ -14,6 +15,8 @@ class SearchConfig:
     redis_db: int
     maps_dir: str
     domain: str
+    embedding_model_path: str
+    faiss_index_path: str
 
     @classmethod
     def from_env(cls) -> 'SearchConfig':
@@ -27,5 +30,7 @@ class SearchConfig:
             redis_port=int(os.getenv('REDIS_PORT', '6379')),
             redis_db=int(os.getenv('REDIS_DB', '1')),
             maps_dir=os.getenv('MAPS_DIR', '/app/maps'),
-            domain=os.getenv('DOMAIN', 'http://localhost:5555')
+            domain=os.getenv('DOMAIN', 'http://localhost:5555'),
+            embedding_model_path=os.getenv('EMBEDDING_MODEL_PATH', '/app/embedding_models/sbert_large_nlu_ru'),
+            faiss_index_path=os.getenv('FAISS_INDEX_PATH', '/app/faiss_index')
         )

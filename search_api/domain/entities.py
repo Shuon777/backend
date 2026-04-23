@@ -54,7 +54,9 @@ class SearchRequest:
     use_llm_answer: bool = False
     user_query: Optional[str] = None
     clean_user_query: Optional[str] = None
-
+    force_vector_search: bool = False
+    vector_similarity_threshold: float = 0.03
+    use_vector_fallback: bool = True
 
 @dataclass
 class ObjectResult:
